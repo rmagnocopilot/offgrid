@@ -18,7 +18,7 @@ class ChatViewProvider {
     view.webview.html = this.#html(view.webview);
     view.webview.onDidReceiveMessage(async message => {
       if (message?.type === 'send' && typeof message.text === 'string') {
-        await this.submitHandler?.(message.text.trim());
+        await this.submitHandler?.(message.text.trim(), message.mode === 'agent' ? 'agent' : 'chat');
       } else if (message?.type === 'abort') {
         this.abortHandler?.();
       }
@@ -72,6 +72,9 @@ class ChatViewProvider {
   .system { opacity: .8; border-left: 3px solid var(--vscode-descriptionForeground); border-radius: 0; }
   #composer { padding: 10px; border-top: 1px solid var(--vscode-panel-border); display: grid; gap: 8px; }
   textarea { width: 100%; min-height: 72px; resize: vertical; padding: 9px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); }
+  .toolbar { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+  select { min-width: 150px; padding: 6px; color: var(--vscode-dropdown-foreground); background: var(--vscode-dropdown-background); border: 1px solid var(--vscode-dropdown-border); }
+  .mode-help { font-size: 11px; opacity: .8; }
   .buttons { display: flex; gap: 8px; }
   button { border: 0; padding: 7px 12px; cursor: pointer; color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
   button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
@@ -83,6 +86,13 @@ class ChatViewProvider {
   <div id="status">Configure um modelo no gerenciador.</div>
   <div id="messages"><div class="message system">Tudo é executado localmente. Os modelos são baixados do GitHub Release configurado.</div></div>
   <div id="composer">
+    <div class="toolbar">
+      <select id="mode">
+        <option value="chat">Chat — somente resposta</option>
+        <option value="agent">Agente — altera arquivos</option>
+      </select>
+      <span id="modeHelp" class="mode-help">Não modifica o workspace.</span>
+    </div>
     <textarea id="input" placeholder="Pergunte sobre o código... (Ctrl+Enter para enviar)"></textarea>
     <div class="buttons"><button id="send">Enviar</button><button id="abort" class="secondary" disabled>Parar</button></div>
   </div>
@@ -93,6 +103,8 @@ class ChatViewProvider {
   const input = document.getElementById('input');
   const send = document.getElementById('send');
   const abort = document.getElementById('abort');
+  const mode = document.getElementById('mode');
+  const modeHelp = document.getElementById('modeHelp');
   let currentAssistant = null;
 
   function add(role, text) {
@@ -109,8 +121,17 @@ class ChatViewProvider {
     input.value = '';
     send.disabled = true;
     abort.disabled = false;
-    vscode.postMessage({ type: 'send', text });
+    vscode.postMessage({ type: 'send', text, mode: mode.value });
   }
+  mode.addEventListener('change', () => {
+    const agent = mode.value === 'agent';
+    modeHelp.textContent = agent
+      ? 'Lê o projeto e node_modules; grava apenas fora de pastas protegidas.'
+      : 'Não modifica o workspace.';
+    input.placeholder = agent
+      ? 'Descreva a alteração que deve ser aplicada no projeto...'
+      : 'Pergunte sobre o código... (Ctrl+Enter para enviar)';
+  });
   send.addEventListener('click', submit);
   abort.addEventListener('click', () => vscode.postMessage({ type: 'abort' }));
   input.addEventListener('keydown', event => {

@@ -1,0 +1,21 @@
+ATUALIZAÇÃO OFFGRID 1.1.0 — MODO AGENTE
+
+1. Feche o VS Code e o GitHub Desktop.
+2. Faça uma cópia da pasta atual do repositório offgrid.
+3. Copie todo o conteúdo desta atualização para a raiz do repositório offgrid.
+   Quando o Windows perguntar, escolha substituir os arquivos existentes.
+4. Abra um PowerShell na pasta do repositório offgrid.
+5. Execute:
+
+   node scripts/apply-agent-update.js
+   npm run check
+   npm test
+   npm run package
+
+6. O instalador gerado será offgrid-1.1.0.vsix. O VSIX antigo não será incluído no novo pacote.
+7. No GitHub Desktop, revise as mudanças, faça commit e Push origin.
+8. No GitHub, crie uma nova Release com a tag extension-v1.1.0 e anexe o VSIX.
+9. No computador da empresa, baixe e instale offgrid-1.1.0.vsix pelo VS Code.
+
+O script preserva o publisher e o endereço do seu repositório no package.json.
+node_modules e .git permanecem estritamente somente leitura no modo Agente.

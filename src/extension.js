@@ -7,6 +7,7 @@ const vscode = require('vscode');
 const { LlamaEngine } = require('./llama-engine');
 const { ChatViewProvider } = require('./chat-view');
 const { ModelInstaller } = require('./model-installer');
+const { WorkspaceAgent } = require('./workspace-agent');
 const { loadCatalog, repositoryReleaseBase, repositoryCoordinates } = require('./model-catalog');
 
 /** @param {vscode.ExtensionContext} context */
@@ -15,6 +16,8 @@ function activate(context) {
   const chat = new ChatViewProvider(context.extensionUri);
   const catalog = loadCatalog(context.extensionPath);
   const systemPrompt = fs.readFileSync(path.join(context.extensionPath, 'resources', 'system-prompt.md'), 'utf8');
+  const agentSystemPrompt = fs.readFileSync(path.join(context.extensionPath, 'resources', 'agent-system-prompt.md'), 'utf8');
+  const agent = new WorkspaceAgent(context, activity => chat.setStatus(`Agente · ${activity}`, 'agent'));
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = 'offgrid.manageModels';
   statusBar.text = '$(plug) Offgrid';
@@ -31,7 +34,8 @@ function activate(context) {
       gpu: config.get('gpu', 'auto'),
       contextSize: config.get('contextSize', 8192),
       maxTokens: config.get('maxTokens', 1024),
-      temperature: config.get('temperature', 0.2)
+      temperature: config.get('temperature', 0.2),
+      agentMaxTokens: config.get('agentMaxTokens', 4096)
     };
   }
 
@@ -214,18 +218,7 @@ function activate(context) {
     return sections.length ? `\n\n<contexto_workspace>\n${sections.join('\n\n')}\n</contexto_workspace>` : '';
   }
 
-  chat.onSubmit(async text => {
-    if (!text) {
-      chat.finishAssistant();
-      return;
-    }
-    chat.addMessage('user', text);
-    if (!engine.isLoaded) {
-      chat.addMessage('system', 'Nenhum modelo carregado. Use “Gerenciar Modelos”.');
-      chat.finishAssistant();
-      return;
-    }
-
+  async function runChat(text) {
     generationAbort = new AbortController();
     chat.addMessage('assistant', '');
     chat.setStatus('Gerando resposta...');
@@ -245,6 +238,107 @@ function activate(context) {
       const options = await modelOptions();
       chat.setStatus(`Pronto · ${path.basename(options.modelPath || 'sem modelo', '.gguf')}`);
     }
+  }
+
+  async function agentTaskPrompt(text) {
+    const editor = vscode.window.activeTextEditor;
+    const hints = [];
+    if (editor) {
+      hints.push(`Arquivo ativo: ${vscode.workspace.asRelativePath(editor.document.uri, true)}`);
+      if (!editor.selection.isEmpty) {
+        const selected = editor.document.getText(editor.selection).slice(0, 6000);
+        hints.push(`Seleção atual (apenas pista; releia o arquivo antes de editar):\n${selected}`);
+      }
+    }
+    const roots = (vscode.workspace.workspaceFolders || []).map(folder => folder.name).join(', ');
+    return [
+      `Tarefa solicitada: ${text}`,
+      roots ? `Workspace(s): ${roots}` : '',
+      ...hints,
+      'Investigue os arquivos necessários, consulte node_modules quando o comportamento de uma biblioteca for relevante, prepare as alterações e chame applyChanges para salvá-las.'
+    ].filter(Boolean).join('\n\n');
+  }
+
+  async function runAgent(text) {
+    if (!vscode.workspace.workspaceFolders?.length) {
+      chat.addMessage('system', 'Abra uma pasta ou workspace antes de usar o modo Agente.');
+      chat.finishAssistant();
+      return;
+    }
+    if (!vscode.workspace.isTrusted) {
+      chat.addMessage('system', 'O modo Agente exige um workspace confiável no VS Code.');
+      chat.finishAssistant();
+      return;
+    }
+
+    const requireConfirmation = vscode.workspace.getConfiguration('offgrid').get('agentRequireConfirmation', true);
+    if (requireConfirmation) {
+      const confirmation = await vscode.window.showWarningMessage(
+        'O Offgrid poderá ler arquivos do workspace e de node_modules. As alterações serão salvas apenas fora de node_modules e .git, com backup para desfazer.',
+        { modal: true },
+        'Executar agente'
+      );
+      if (confirmation !== 'Executar agente') {
+        chat.addMessage('system', 'Execução do agente cancelada.');
+        chat.finishAssistant();
+        return;
+      }
+    }
+
+    agent.reset();
+    generationAbort = new AbortController();
+    chat.addMessage('assistant', '');
+    chat.setStatus('Agente · iniciando análise...');
+    let streamed = false;
+    try {
+      const functions = await agent.createFunctions();
+      const options = await modelOptions();
+      const result = await engine.runAgent(await agentTaskPrompt(text), {
+        functions,
+        agentSystemPrompt,
+        maxTokens: options.agentMaxTokens,
+        signal: generationAbort.signal,
+        onChunk: chunk => {
+          streamed = true;
+          chat.appendAssistant(chunk);
+        }
+      });
+      if (!streamed && result) chat.appendAssistant(result);
+
+      if (agent.appliedFiles.length) {
+        const action = await vscode.window.showInformationMessage(
+          `Offgrid alterou e salvou ${agent.appliedFiles.length} arquivo(s).`,
+          'Desfazer alterações'
+        );
+        if (action === 'Desfazer alterações') await vscode.commands.executeCommand('offgrid.undoLastAgentChanges');
+      }
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        chat.appendAssistant(`\n\n[Erro do agente: ${error instanceof Error ? error.message : String(error)}]`);
+      }
+    } finally {
+      agent.staged.clear();
+      generationAbort = null;
+      chat.finishAssistant();
+      const options = await modelOptions();
+      chat.setStatus(`Pronto · ${path.basename(options.modelPath || 'sem modelo', '.gguf')}`);
+    }
+  }
+
+  chat.onSubmit(async (text, mode = 'chat') => {
+    if (!text) {
+      chat.finishAssistant();
+      return;
+    }
+    chat.addMessage('user', mode === 'agent' ? `[Agente] ${text}` : text);
+    if (!engine.isLoaded) {
+      chat.addMessage('system', 'Nenhum modelo carregado. Use “Gerenciar Modelos”.');
+      chat.finishAssistant();
+      return;
+    }
+
+    if (mode === 'agent') await runAgent(text);
+    else await runChat(text);
   });
 
   chat.onAbort(() => generationAbort?.abort());
@@ -275,6 +369,14 @@ function activate(context) {
     vscode.commands.registerCommand('offgrid.clearChat', async () => {
       chat.clear();
       await engine.clearHistory(systemPrompt);
+    }),
+    vscode.commands.registerCommand('offgrid.undoLastAgentChanges', async () => {
+      try {
+        const files = await agent.undoLastChanges();
+        vscode.window.showInformationMessage(`Alterações desfeitas em ${files.length} arquivo(s).`);
+      } catch (error) {
+        vscode.window.showErrorMessage(`Offgrid: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration('offgrid.modelPath')

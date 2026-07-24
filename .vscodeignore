@@ -6,3 +6,4 @@ models/*.gguf
 models/*.part-*
 MODEL_RELEASE.md
 .gitignore
+*.vsix

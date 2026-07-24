@@ -2,7 +2,7 @@
   "name": "offgrid",
   "displayName": "Offgrid",
   "description": "Assistente de programação local para VS Code com modelos GGUF distribuídos por GitHub Releases.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "rmagnocopilot",
   "license": "MIT",
   "engines": {
@@ -29,7 +29,7 @@
   ],
   "main": "./src/extension.js",
   "scripts": {
-    "check": "node --check src/extension.js && node --check src/llama-engine.js && node --check src/model-installer.js && node --check src/chat-view.js",
+    "check": "node --check src/extension.js && node --check src/llama-engine.js && node --check src/model-installer.js && node --check src/chat-view.js && node --check src/workspace-agent.js && node --check src/agent-safety.js",
     "configure": "node scripts/configure-repository.js",
     "package": "npx --yes @vscode/vsce package",
     "test": "node --test tests/*.test.js"
@@ -60,6 +60,11 @@
         "command": "offgrid.setGithubToken",
         "title": "Offgrid: Configurar Token do GitHub",
         "icon": "$(key)"
+      },
+      {
+        "command": "offgrid.undoLastAgentChanges",
+        "title": "Offgrid: Desfazer Últimas Alterações do Agente",
+        "icon": "$(discard)"
       }
     ],
     "viewsContainers": {
@@ -144,11 +149,26 @@
           "type": "boolean",
           "default": true,
           "description": "Inclui arquivo ativo, seleção e estrutura resumida do workspace no prompt."
+        },
+        "offgrid.agentMaxTokens": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 512,
+          "maximum": 16384,
+          "description": "Máximo de tokens usado pelo modo Agente para planejar, chamar ferramentas e resumir alterações."
+        },
+        "offgrid.agentRequireConfirmation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Solicita confirmação antes de permitir que o modo Agente leia e altere o workspace."
         }
       }
     }
   },
   "dependencies": {
     "node-llama-cpp": "^3.0.0"
+  },
+  "allowScripts": {
+    "node-llama-cpp@3.19.1": true
   }
 }

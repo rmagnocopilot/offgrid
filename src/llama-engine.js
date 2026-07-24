@@ -15,6 +15,7 @@ class LlamaEngine {
     this.context = null;
     this.session = null;
     this.options = null;
+    this.systemPrompt = '';
   }
 
   get isLoaded() {
@@ -48,6 +49,7 @@ class LlamaEngine {
       systemPrompt
     });
     this.options = options;
+    this.systemPrompt = systemPrompt;
   }
 
   async prompt(text, { signal, onChunk } = {}) {
@@ -63,7 +65,26 @@ class LlamaEngine {
     });
   }
 
-  async clearHistory(systemPrompt) {
+  async runAgent(text, { functions, agentSystemPrompt, signal, onChunk, maxTokens } = {}) {
+    if (!this.context || !this.options) {
+      throw new Error('Nenhum modelo carregado.');
+    }
+
+    await this.clearHistory(agentSystemPrompt);
+    try {
+      return await this.session.prompt(text, {
+        functions,
+        maxTokens: maxTokens || Math.max(this.options.maxTokens, 4096),
+        temperature: Math.min(this.options.temperature, 0.2),
+        signal,
+        onTextChunk: chunk => onChunk?.(chunk)
+      });
+    } finally {
+      await this.clearHistory(this.systemPrompt);
+    }
+  }
+
+  async clearHistory(systemPrompt = this.systemPrompt) {
     if (!this.context || !this.options) return;
     try { await this.session?.dispose?.(); } catch { /* best effort */ }
     const { LlamaChatSession } = await loadLlamaModule();
@@ -86,6 +107,7 @@ class LlamaEngine {
     this.model = null;
     this.llama = null;
     this.options = null;
+    this.systemPrompt = '';
   }
 }
 
