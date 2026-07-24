@@ -1,0 +1,154 @@
+{
+  "name": "offgrid",
+  "displayName": "Offgrid",
+  "description": "Assistente de programação local para VS Code com modelos GGUF distribuídos por GitHub Releases.",
+  "version": "1.0.0",
+  "publisher": "rmagnocopilot",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "offline",
+    "local llm",
+    "gguf",
+    "llama",
+    "qwen"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rmagnocopilot/offgrid.git"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./src/extension.js",
+  "scripts": {
+    "check": "node --check src/extension.js && node --check src/llama-engine.js && node --check src/model-installer.js && node --check src/chat-view.js",
+    "configure": "node scripts/configure-repository.js",
+    "package": "npx --yes @vscode/vsce package",
+    "test": "node --test tests/*.test.js"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "offgrid.openChat",
+        "title": "Offgrid: Abrir Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "offgrid.manageModels",
+        "title": "Offgrid: Gerenciar Modelos",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "offgrid.selectLocalModel",
+        "title": "Offgrid: Selecionar GGUF Local",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "offgrid.clearChat",
+        "title": "Offgrid: Limpar Conversa",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "offgrid.setGithubToken",
+        "title": "Offgrid: Configurar Token do GitHub",
+        "icon": "$(key)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "offgrid",
+          "title": "Offgrid",
+          "icon": "resources/icons/offgrid.svg"
+        }
+      ]
+    },
+    "views": {
+      "offgrid": [
+        {
+          "id": "offgrid.chatView",
+          "name": "Chat Local",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "offgrid.manageModels",
+          "when": "view == offgrid.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "offgrid.clearChat",
+          "when": "view == offgrid.chatView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Offgrid",
+      "properties": {
+        "offgrid.modelPath": {
+          "type": "string",
+          "default": "",
+          "description": "Caminho absoluto para o modelo GGUF ativo."
+        },
+        "offgrid.releaseBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "URL base opcional para os assets, por exemplo https://github.com/OWNER/REPO/releases/download/models-v1. Vazio usa o campo repository deste package.json."
+        },
+        "offgrid.gpu": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "cpu",
+            "cuda",
+            "vulkan",
+            "metal"
+          ],
+          "default": "auto",
+          "description": "Backend usado pelo node-llama-cpp."
+        },
+        "offgrid.contextSize": {
+          "type": "number",
+          "default": 8192,
+          "minimum": 1024,
+          "maximum": 32768,
+          "description": "Janela de contexto carregada pelo modelo."
+        },
+        "offgrid.maxTokens": {
+          "type": "number",
+          "default": 1024,
+          "minimum": 64,
+          "maximum": 8192,
+          "description": "Máximo de tokens por resposta."
+        },
+        "offgrid.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Temperatura da geração."
+        },
+        "offgrid.includeWorkspaceContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inclui arquivo ativo, seleção e estrutura resumida do workspace no prompt."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "node-llama-cpp": "^3.0.0"
+  }
+}

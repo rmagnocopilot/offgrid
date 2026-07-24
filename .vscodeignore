@@ -1,0 +1,8 @@
+.github/**
+.vscode/**
+scripts/**
+tests/**
+models/*.gguf
+models/*.part-*
+MODEL_RELEASE.md
+.gitignore
