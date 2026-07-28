@@ -22,11 +22,43 @@ class WorkspaceAgent {
     this.onActivity = onActivity;
     this.staged = new Map();
     this.appliedFiles = [];
+    this.reviewSummary = '';
   }
 
   reset() {
     this.staged.clear();
     this.appliedFiles = [];
+    this.reviewSummary = '';
+  }
+
+  get hasPendingReview() {
+    return this.staged.size > 0 && Boolean(this.reviewSummary);
+  }
+
+  get hasStagedChanges() {
+    return this.staged.size > 0;
+  }
+
+  getPendingReview() {
+    if (!this.staged.size) return null;
+    return {
+      summary: this.reviewSummary || 'Alterações propostas pelo agente',
+      files: [...this.staged.keys()]
+    };
+  }
+
+  getPendingChange(filePath) {
+    const normalized = normalizeRelativePath(filePath);
+    const entry = this.staged.get(normalized)
+      || [...this.staged.entries()].find(([relative]) => relative === filePath)?.[1];
+    const relative = this.staged.has(normalized) ? normalized : filePath;
+    if (!entry) throw new Error(`Alteração pendente não encontrada: ${filePath}`);
+    return {
+      filePath: relative,
+      originalContent: entry.originalContent,
+      proposedContent: entry.content,
+      existed: entry.existed
+    };
   }
 
   async createFunctions() {
@@ -115,7 +147,7 @@ class WorkspaceAgent {
       }),
 
       applyChanges: defineChatSessionFunction({
-        description: 'Aplica e salva todas as alterações preparadas. Cria backup e nunca grava em node_modules ou .git.',
+        description: 'Finaliza as alterações preparadas e envia para revisão do usuário. Não salva nada até o usuário aceitar no chat. Nunca grava em node_modules ou .git.',
         params: {
           type: 'object',
           properties: {
@@ -238,11 +270,37 @@ class WorkspaceAgent {
       }
     }
 
+    this.reviewSummary = String(summary || 'Alterações propostas pelo agente').trim();
+    this.onActivity(`${this.staged.size} arquivo(s) aguardando revisão`);
+    return this.#result({
+      reviewRequired: true,
+      summary: this.reviewSummary,
+      files: [...this.staged.keys()],
+      message: 'As alterações foram preparadas. Aguarde o usuário abrir os diffs e aceitar ou rejeitar no chat.'
+    });
+  }
+
+  preparePendingReview(summary = 'Alterações propostas pelo agente') {
+    if (!this.staged.size) return null;
+    this.reviewSummary = String(summary || 'Alterações propostas pelo agente').trim();
+    return this.getPendingReview();
+  }
+
+  async acceptPendingChanges() {
+    this.#requireWorkspace();
+    if (!vscode.workspace.isTrusted) throw new Error('O workspace não está marcado como confiável no VS Code.');
+    if (!this.staged.size) throw new Error('Nenhuma alteração pendente para aceitar.');
+
+    for (const relative of this.staged.keys()) {
+      if (isWriteProtectedPath(relative)) throw new Error(`Bloqueio de segurança: não é permitido modificar ${relative}.`);
+    }
+
+    const summary = this.reviewSummary || 'Alterações aceitas pelo usuário';
     const backup = await this.#createBackup(summary);
     const edit = new vscode.WorkspaceEdit();
     const documentsToSave = [];
 
-    for (const [relative, staged] of this.staged) {
+    for (const [, staged] of this.staged) {
       const uri = vscode.Uri.file(staged.absolute);
       if (staged.existed) {
         const document = await vscode.workspace.openTextDocument(uri);
@@ -258,7 +316,7 @@ class WorkspaceAgent {
     }
 
     const applied = await vscode.workspace.applyEdit(edit);
-    if (!applied) return this.#result({ error: 'O VS Code recusou a aplicação das alterações.' });
+    if (!applied) throw new Error('O VS Code recusou a aplicação das alterações.');
 
     for (const uri of documentsToSave) {
       const document = await vscode.workspace.openTextDocument(uri);
@@ -266,17 +324,21 @@ class WorkspaceAgent {
     }
 
     this.appliedFiles = [...this.staged.keys()];
+    const files = [...this.appliedFiles];
     this.staged.clear();
+    this.reviewSummary = '';
     await this.context.globalState.update('offgrid.lastAgentBackup', backup.manifestPath);
-    this.onActivity(`${this.appliedFiles.length} arquivo(s) salvo(s)`);
+    this.onActivity(`${files.length} arquivo(s) aceito(s) e salvo(s)`);
 
-    return this.#result({
-      applied: true,
-      summary,
-      files: this.appliedFiles,
-      backup: backup.displayPath,
-      nodeModulesModified: false
-    });
+    return { applied: true, summary, files, backup: backup.displayPath };
+  }
+
+  rejectPendingChanges() {
+    const files = [...this.staged.keys()];
+    this.staged.clear();
+    this.reviewSummary = '';
+    this.onActivity(`${files.length} alteração(ões) rejeitada(s)`);
+    return files;
   }
 
   async undoLastChanges() {

@@ -9,17 +9,24 @@ function loadLlamaModule() {
 }
 
 class LlamaEngine {
-  constructor() {
+  constructor(logger = () => {}) {
+    this.logger = logger;
     this.llama = null;
     this.model = null;
     this.context = null;
     this.session = null;
     this.options = null;
     this.systemPrompt = '';
+    this.loadQueue = Promise.resolve();
+    this.loading = false;
   }
 
   get isLoaded() {
     return Boolean(this.model && this.context && this.session);
+  }
+
+  get isLoading() {
+    return this.loading;
   }
 
   get backend() {
@@ -27,6 +34,14 @@ class LlamaEngine {
   }
 
   async load(options, systemPrompt) {
+    const task = this.loadQueue
+      .catch(() => undefined)
+      .then(() => this.#loadInternal(options, systemPrompt));
+    this.loadQueue = task;
+    return task;
+  }
+
+  async #loadInternal(options, systemPrompt) {
     if (!fs.existsSync(options.modelPath)) {
       throw new Error(`Modelo não encontrado: ${options.modelPath}`);
     }
@@ -35,28 +50,55 @@ class LlamaEngine {
       && this.options.modelPath === options.modelPath
       && this.options.contextSize === options.contextSize
       && this.options.gpu === options.gpu;
-    if (sameModel && this.isLoaded) return;
+    if (sameModel && this.isLoaded) {
+      this.logger(`Modelo já carregado: ${options.modelPath}`);
+      return;
+    }
 
-    await this.dispose();
-    const { getLlama, LlamaChatSession, LlamaLogLevel } = await loadLlamaModule();
-    const gpu = options.gpu === 'cpu' ? false : options.gpu;
+    this.loading = true;
+    this.logger(`Iniciando carregamento: ${options.modelPath}`);
+    try {
+      await this.#disposeResources();
+      const { getLlama, LlamaChatSession, LlamaLogLevel } = await loadLlamaModule();
+      const commonOptions = { logLevel: LlamaLogLevel.warn };
 
-    this.llama = await getLlama({ gpu, logLevel: LlamaLogLevel.warn });
-    this.model = await this.llama.loadModel({ modelPath: options.modelPath });
-    this.context = await this.model.createContext({ contextSize: options.contextSize });
-    this.session = new LlamaChatSession({
-      contextSequence: this.context.getSequence(),
-      systemPrompt
-    });
-    this.options = options;
-    this.systemPrompt = systemPrompt;
+      if (options.gpu === 'auto') {
+        try {
+          this.logger('Backend: detecção automática');
+          this.llama = await getLlama(commonOptions);
+        } catch (autoError) {
+          this.logger(`Backend automático falhou: ${this.#errorText(autoError)}`);
+          this.logger('Tentando novamente em CPU');
+          this.llama = await getLlama({ ...commonOptions, gpu: false });
+        }
+      } else {
+        const gpu = options.gpu === 'cpu' ? false : options.gpu;
+        this.logger(`Backend solicitado: ${options.gpu}`);
+        this.llama = await getLlama({ ...commonOptions, gpu });
+      }
+
+      this.logger('Carregando pesos GGUF');
+      this.model = await this.llama.loadModel({ modelPath: options.modelPath });
+      this.logger(`Criando contexto de ${options.contextSize} tokens`);
+      this.context = await this.model.createContext({ contextSize: options.contextSize });
+      this.session = new LlamaChatSession({
+        contextSequence: this.context.getSequence(),
+        systemPrompt
+      });
+      this.options = { ...options };
+      this.systemPrompt = systemPrompt;
+      this.logger(`Modelo carregado. Backend efetivo: ${this.backend || 'cpu'}`);
+    } catch (error) {
+      this.logger(`Falha no carregamento: ${this.#errorText(error)}`);
+      await this.#disposeResources();
+      throw error;
+    } finally {
+      this.loading = false;
+    }
   }
 
   async prompt(text, { signal, onChunk } = {}) {
-    if (!this.session || !this.options) {
-      throw new Error('Nenhum modelo carregado.');
-    }
-
+    if (!this.session || !this.options) throw new Error('Nenhum modelo carregado.');
     return this.session.prompt(text, {
       maxTokens: this.options.maxTokens,
       temperature: this.options.temperature,
@@ -66,9 +108,7 @@ class LlamaEngine {
   }
 
   async runAgent(text, { functions, agentSystemPrompt, signal, onChunk, maxTokens } = {}) {
-    if (!this.context || !this.options) {
-      throw new Error('Nenhum modelo carregado.');
-    }
+    if (!this.context || !this.options) throw new Error('Nenhum modelo carregado.');
 
     await this.clearHistory(agentSystemPrompt);
     try {
@@ -94,7 +134,7 @@ class LlamaEngine {
     });
   }
 
-  async dispose() {
+  async #disposeResources() {
     const safeDispose = async value => {
       try { await value?.dispose?.(); } catch { /* best effort */ }
     };
@@ -108,6 +148,15 @@ class LlamaEngine {
     this.llama = null;
     this.options = null;
     this.systemPrompt = '';
+  }
+
+  async dispose() {
+    await this.loadQueue.catch(() => undefined);
+    await this.#disposeResources();
+  }
+
+  #errorText(error) {
+    return error instanceof Error ? `${error.message}\n${error.stack || ''}` : String(error);
   }
 }
 

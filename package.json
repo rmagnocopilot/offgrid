@@ -2,7 +2,7 @@
   "name": "offgrid",
   "displayName": "Offgrid",
   "description": "Assistente de programação local para VS Code com modelos GGUF distribuídos por GitHub Releases.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "rmagnocopilot",
   "license": "MIT",
   "engines": {
@@ -29,7 +29,7 @@
   ],
   "main": "./src/extension.js",
   "scripts": {
-    "check": "node --check src/extension.js && node --check src/llama-engine.js && node --check src/model-installer.js && node --check src/chat-view.js && node --check src/workspace-agent.js && node --check src/agent-safety.js",
+    "check": "node --check src/extension.js && node --check src/llama-engine.js && node --check src/model-installer.js && node --check src/chat-view.js && node --check src/workspace-agent.js && node --check src/agent-safety.js && node --check src/change-preview.js",
     "configure": "node scripts/configure-repository.js",
     "package": "npx --yes @vscode/vsce package",
     "test": "node --test tests/*.test.js"
@@ -65,6 +65,21 @@
         "command": "offgrid.undoLastAgentChanges",
         "title": "Offgrid: Desfazer Últimas Alterações do Agente",
         "icon": "$(discard)"
+      },
+      {
+        "command": "offgrid.reloadModel",
+        "title": "Offgrid: Recarregar Modelo",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "offgrid.pinActiveFile",
+        "title": "Offgrid: Fixar Arquivo Ativo no Chat",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "offgrid.unpinFile",
+        "title": "Offgrid: Voltar a Acompanhar a Aba Ativa",
+        "icon": "$(pinned-dirty)"
       }
     ],
     "viewsContainers": {
@@ -126,7 +141,7 @@
         },
         "offgrid.contextSize": {
           "type": "number",
-          "default": 8192,
+          "default": 4096,
           "minimum": 1024,
           "maximum": 32768,
           "description": "Janela de contexto carregada pelo modelo."
@@ -161,6 +176,11 @@
           "type": "boolean",
           "default": true,
           "description": "Solicita confirmação antes de permitir que o modo Agente leia e altere o workspace."
+        },
+        "offgrid.agentRequireReview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Exibe os arquivos alterados e exige aceitar ou rejeitar a proposta antes de salvar."
         }
       }
     }

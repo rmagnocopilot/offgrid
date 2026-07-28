@@ -7,3 +7,4 @@ models/*.part-*
 MODEL_RELEASE.md
 .gitignore
 *.vsix
+INSTRUCOES-ATUALIZACAO*.txt

@@ -1,82 +1,71 @@
 # Offgrid
 
-Assistente de programação local para Visual Studio Code, desenvolvido para funcionar sem acesso direto ao Hugging Face.
+Assistente de programação local para Visual Studio Code com modelos GGUF baixados pelo GitHub Releases.
 
-O Offgrid baixa os modelos pelo GitHub Releases, remonta o arquivo GGUF no computador e valida sua integridade antes do uso. Depois da instalação, toda a inferência acontece localmente.
+A inferência ocorre no computador. O conteúdo do workspace não é enviado ao GitHub nem a serviços externos durante o chat.
 
-O código do workspace não é enviado ao GitHub nem a serviços externos durante o uso.
+## Modelos
 
-## Modelos disponíveis
-
-| Modelo | Recomendação | Tamanho aproximado |
+| Modelo | Indicação | Tamanho aproximado |
 |---|---|---:|
-| Qwen2.5-Coder-3B-Instruct Q4_K_M | Sem GPU ou com pouca memória RAM | 2,1 GB |
-| Qwen2.5-Coder-7B-Instruct Q4_K_M | 16 GB ou mais de RAM ou GPU compatível | 4,7 GB |
-
-> O modelo 3B utiliza a Qwen Research License e é destinado somente a pesquisa ou uso não comercial. O modelo 7B utiliza a licença Apache-2.0.
+| Qwen2.5-Coder-3B-Instruct Q4_K_M | Máquina com pouca memória; pesquisa/não comercial | 2,1 GB |
+| Qwen2.5-Coder-7B-Instruct Q4_K_M | Angular, TypeScript, HTML, Java e Spring | 4,7 GB |
 
 ## Instalação
 
-1. Abra **Releases** neste repositório.
-2. Abra a versão mais recente do Offgrid.
-3. Em **Assets**, baixe o arquivo `.vsix`.
-4. No VS Code, abra **Extensões → ... → Install from VSIX...**.
-5. Selecione o arquivo baixado e reinicie o VS Code.
+1. Abra **Releases**.
+2. Baixe o `.vsix` da versão mais recente.
+3. No VS Code, use **Extensões → ... → Install from VSIX...**.
+4. Reinicie o VS Code.
+5. Execute **Offgrid: Gerenciar Modelos** e escolha o 7B.
 
-## Baixar um modelo
+## Arquivo fixado
 
-1. Pressione `Ctrl + Shift + P`.
-2. Execute `Offgrid: Gerenciar Modelos`.
-3. Escolha o modelo e aguarde o download e a validação.
+O Offgrid acompanha automaticamente a aba de código ativa e mostra o arquivo de contexto acima do chat.
 
-Os modelos são baixados exclusivamente pelos assets do GitHub Releases.
+- **Fixar aba:** mantém aquele arquivo como ponto de partida, mesmo que outras abas sejam abertas.
+- **Auto:** volta a acompanhar a aba ativa.
+- **Abrir:** reabre o arquivo fixado.
 
-Em repositórios privados, execute antes `Offgrid: Configurar Token do GitHub` e informe um token com permissão de leitura para o repositório.
+No modo Agente, esse arquivo é lido primeiro e serve como início da pesquisa pelos arquivos relacionados.
 
-Em repositórios públicos, nenhuma configuração de token é necessária.
+## Revisão das alterações
 
-## Chat e modo Agente
+O agente não salva imediatamente.
 
-Abra o painel Offgrid na barra lateral do VS Code ou execute `Offgrid: Abrir Chat`.
+1. Ele pesquisa o workspace e prepara a proposta.
+2. O chat mostra a lista de arquivos afetados.
+3. Clique em **Ver diff** para abrir a comparação do VS Code:
+   - linhas antigas ou removidas aparecem em vermelho;
+   - linhas novas aparecem em verde.
+4. Escolha **Aceitar alterações** ou **Rejeitar**.
+5. Depois de aceitar, ainda é possível executar **Offgrid: Desfazer Últimas Alterações do Agente**.
 
-- **Chat — somente resposta:** analisa o contexto e responde sem modificar arquivos.
-- **Agente — altera arquivos:** pesquisa o workspace, consulta bibliotecas instaladas em `node_modules` e salva as alterações solicitadas.
+`node_modules` e `.git` permanecem somente leitura.
 
-No modo Agente:
+## Diagnóstico de modelo
 
-- `node_modules` e `.git` são sempre somente leitura.
-- Nenhum arquivo pode ser alterado fora do workspace.
-- Um backup é criado antes das alterações.
-- Use `Offgrid: Desfazer Últimas Alterações do Agente` para restaurar o backup mais recente.
-- Comandos de terminal não são executados automaticamente.
+Se o modelo não carregar:
 
-O modelo 7B é o mais recomendado para alterações envolvendo vários arquivos.
+1. Execute **Offgrid: Recarregar Modelo**.
+2. Abra **Exibir → Saída**.
+3. Selecione o canal **Offgrid**.
 
-## Privacidade
+No backend `auto`, a extensão tenta a detecção automática e usa CPU como alternativa se ela falhar.
 
-A execução do modelo acontece localmente no computador.
+## Configuração recomendada
 
-O código aberto no VS Code não é enviado ao GitHub nem a serviços externos durante o chat. A conexão com a internet é utilizada apenas para baixar o modelo quando ele ainda não está instalado.
-
-## Armazenamento
-
-O modelo é salvo no armazenamento interno da extensão, fora da pasta do projeto e fora do controle de versão do Git.
-
-Para remover um modelo instalado, execute `Offgrid: Gerenciar Modelos`.
-
-## Configurações principais
-
-- `offgrid.gpu`: `auto`, `cpu`, `cuda`, `vulkan` ou `metal`.
-- `offgrid.contextSize`: tamanho da janela de contexto.
-- `offgrid.agentMaxTokens`: limite de geração usado pelo modo Agente.
-- `offgrid.agentRequireConfirmation`: pede confirmação antes de alterar o workspace.
-- `offgrid.includeWorkspaceContext`: inclui o arquivo ativo no modo Chat.
-- `offgrid.modelPath`: caminho do modelo GGUF atualmente selecionado.
+```json
+{
+  "offgrid.gpu": "auto",
+  "offgrid.contextSize": 4096,
+  "offgrid.includeWorkspaceContext": true,
+  "offgrid.agentRequireReview": true
+}
+```
 
 ## Licenças
 
-- Código do Offgrid: MIT.
+- Código: MIT.
 - Qwen2.5-Coder-7B-Instruct: Apache-2.0.
 - Qwen2.5-Coder-3B-Instruct: Qwen Research License.
-
-Consulte `LICENSE`, `NOTICE` e `MODEL_LICENSES.md`.

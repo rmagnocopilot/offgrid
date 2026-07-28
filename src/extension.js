@@ -8,12 +8,19 @@ const { LlamaEngine } = require('./llama-engine');
 const { ChatViewProvider } = require('./chat-view');
 const { ModelInstaller } = require('./model-installer');
 const { WorkspaceAgent } = require('./workspace-agent');
+const { ChangePreviewProvider } = require('./change-preview');
 const { loadCatalog, repositoryReleaseBase, repositoryCoordinates } = require('./model-catalog');
 
 /** @param {vscode.ExtensionContext} context */
 function activate(context) {
-  const engine = new LlamaEngine();
+  const output = vscode.window.createOutputChannel('Offgrid');
+  const log = message => {
+    const timestamp = new Date().toISOString();
+    output.appendLine(`[${timestamp}] ${message}`);
+  };
+  const engine = new LlamaEngine(log);
   const chat = new ChatViewProvider(context.extensionUri);
+  const changePreview = new ChangePreviewProvider();
   const catalog = loadCatalog(context.extensionPath);
   const systemPrompt = fs.readFileSync(path.join(context.extensionPath, 'resources', 'system-prompt.md'), 'utf8');
   const agentSystemPrompt = fs.readFileSync(path.join(context.extensionPath, 'resources', 'agent-system-prompt.md'), 'utf8');
@@ -26,13 +33,37 @@ function activate(context) {
 
   let generationAbort = null;
   let currentInstaller = null;
+  let pinnedUri = null;
+  let pinLocked = false;
+
+  function relativePath(uri) {
+    if (!uri) return '';
+    return vscode.workspace.asRelativePath(uri, true);
+  }
+
+  function canUseAsContext(uri) {
+    return Boolean(uri && uri.scheme === 'file' && vscode.workspace.getWorkspaceFolder(uri));
+  }
+
+  function setPinnedUri(uri, locked = pinLocked) {
+    pinnedUri = canUseAsContext(uri) ? uri : null;
+    pinLocked = Boolean(locked && pinnedUri);
+    chat.setPinnedFile(relativePath(pinnedUri), pinLocked);
+  }
+
+  function followActiveEditor(editor = vscode.window.activeTextEditor) {
+    if (pinLocked) return;
+    if (editor && canUseAsContext(editor.document.uri)) setPinnedUri(editor.document.uri, false);
+  }
+
+  followActiveEditor();
 
   async function modelOptions() {
     const config = vscode.workspace.getConfiguration('offgrid');
     return {
       modelPath: config.get('modelPath', ''),
       gpu: config.get('gpu', 'auto'),
-      contextSize: config.get('contextSize', 8192),
+      contextSize: config.get('contextSize', 4096),
       maxTokens: config.get('maxTokens', 1024),
       temperature: config.get('temperature', 0.2),
       agentMaxTokens: config.get('agentMaxTokens', 4096)
@@ -44,22 +75,35 @@ function activate(context) {
     if (!options.modelPath) {
       chat.setStatus('Nenhum modelo configurado. Abra o gerenciador de modelos.');
       statusBar.text = '$(plug) Offgrid';
-      return;
+      log('Nenhum modelPath configurado.');
+      return false;
     }
 
     const modelName = path.basename(options.modelPath, '.gguf');
     chat.setStatus(`Carregando ${modelName}...`);
     statusBar.text = `$(loading~spin) ${modelName}`;
+    log(`Solicitado carregamento de ${options.modelPath}; gpu=${options.gpu}; contexto=${options.contextSize}`);
     try {
       await engine.load(options, systemPrompt);
       const backend = engine.backend ? String(engine.backend).toUpperCase() : 'CPU';
       chat.setStatus(`Pronto · ${modelName} · ${backend}`);
       statusBar.text = `$(plug) ${modelName} [${backend}]`;
+      log(`Modelo pronto: ${modelName}; backend=${backend}`);
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const details = error instanceof Error ? error.stack || error.message : String(error);
+      log(`ERRO ao carregar modelo: ${details}`);
       chat.setStatus(`Erro ao carregar: ${message}`);
       statusBar.text = '$(error) Offgrid';
-      if (showErrors) vscode.window.showErrorMessage(`Offgrid: ${message}`);
+      if (showErrors) {
+        const action = await vscode.window.showErrorMessage(
+          `Offgrid: não foi possível carregar o modelo. ${message}`,
+          'Abrir logs'
+        );
+        if (action === 'Abrir logs') output.show(true);
+      }
+      return false;
     }
   }
 
@@ -192,17 +236,20 @@ function activate(context) {
 
   async function buildWorkspaceContext() {
     if (!vscode.workspace.getConfiguration('offgrid').get('includeWorkspaceContext', true)) return '';
-    const editor = vscode.window.activeTextEditor;
     const sections = [];
+    const contextUri = pinnedUri || vscode.window.activeTextEditor?.document.uri;
 
-    if (editor) {
-      const document = editor.document;
-      const selectedText = editor.selection.isEmpty ? '' : document.getText(editor.selection);
+    if (contextUri && canUseAsContext(contextUri)) {
+      const document = await vscode.workspace.openTextDocument(contextUri);
+      const activeEditor = vscode.window.activeTextEditor;
+      const selectedText = activeEditor?.document.uri.toString() === contextUri.toString() && !activeEditor.selection.isEmpty
+        ? document.getText(activeEditor.selection)
+        : '';
       let documentText = document.getText();
       const maxChars = 24000;
       if (documentText.length > maxChars) documentText = `${documentText.slice(0, maxChars)}\n...[arquivo truncado]`;
-      sections.push(`## Arquivo ativo\nCaminho: ${vscode.workspace.asRelativePath(document.uri)}\nLinguagem: ${document.languageId}\n\n\`\`\`${document.languageId}\n${documentText}\n\`\`\``);
-      if (selectedText) sections.push(`## Seleção atual\n\n\`\`\`${document.languageId}\n${selectedText.slice(0, 12000)}\n\`\`\``);
+      sections.push(`## Arquivo fixado — ponto de partida\nCaminho: ${relativePath(contextUri)}\nLinguagem: ${document.languageId}\n\n\`\`\`${document.languageId}\n${documentText}\n\`\`\``);
+      if (selectedText) sections.push(`## Seleção atual do arquivo fixado\n\n\`\`\`${document.languageId}\n${selectedText.slice(0, 12000)}\n\`\`\``);
     }
 
     if (vscode.workspace.workspaceFolders?.length) {
@@ -241,12 +288,13 @@ function activate(context) {
   }
 
   async function agentTaskPrompt(text) {
-    const editor = vscode.window.activeTextEditor;
     const hints = [];
-    if (editor) {
-      hints.push(`Arquivo ativo: ${vscode.workspace.asRelativePath(editor.document.uri, true)}`);
-      if (!editor.selection.isEmpty) {
-        const selected = editor.document.getText(editor.selection).slice(0, 6000);
+    const contextUri = pinnedUri || vscode.window.activeTextEditor?.document.uri;
+    if (contextUri && canUseAsContext(contextUri)) {
+      hints.push(`Arquivo fixado e ponto de partida obrigatório: ${relativePath(contextUri)}`);
+      const activeEditor = vscode.window.activeTextEditor;
+      if (activeEditor?.document.uri.toString() === contextUri.toString() && !activeEditor.selection.isEmpty) {
+        const selected = activeEditor.document.getText(activeEditor.selection).slice(0, 6000);
         hints.push(`Seleção atual (apenas pista; releia o arquivo antes de editar):\n${selected}`);
       }
     }
@@ -255,11 +303,17 @@ function activate(context) {
       `Tarefa solicitada: ${text}`,
       roots ? `Workspace(s): ${roots}` : '',
       ...hints,
-      'Investigue os arquivos necessários, consulte node_modules quando o comportamento de uma biblioteca for relevante, prepare as alterações e chame applyChanges para salvá-las.'
+      'Comece lendo o arquivo fixado, pesquise os arquivos relacionados e consulte node_modules somente quando necessário.',
+      'Prepare as alterações e chame applyChanges. Essa ferramenta NÃO salva: ela envia a proposta para revisão visual do usuário.'
     ].filter(Boolean).join('\n\n');
   }
 
   async function runAgent(text) {
+    if (agent.hasPendingReview) {
+      chat.addMessage('system', 'Existe uma revisão pendente. Aceite ou rejeite as alterações atuais antes de iniciar outra tarefa.');
+      chat.finishAssistant();
+      return;
+    }
     if (!vscode.workspace.workspaceFolders?.length) {
       chat.addMessage('system', 'Abra uma pasta ou workspace antes de usar o modo Agente.');
       chat.finishAssistant();
@@ -274,7 +328,7 @@ function activate(context) {
     const requireConfirmation = vscode.workspace.getConfiguration('offgrid').get('agentRequireConfirmation', true);
     if (requireConfirmation) {
       const confirmation = await vscode.window.showWarningMessage(
-        'O Offgrid poderá ler arquivos do workspace e de node_modules. As alterações serão salvas apenas fora de node_modules e .git, com backup para desfazer.',
+        'O Offgrid poderá ler arquivos do workspace e de node_modules. Ele preparará uma proposta; nada será salvo até você revisar os diffs e aceitar.',
         { modal: true },
         'Executar agente'
       );
@@ -305,19 +359,26 @@ function activate(context) {
       });
       if (!streamed && result) chat.appendAssistant(result);
 
-      if (agent.appliedFiles.length) {
-        const action = await vscode.window.showInformationMessage(
-          `Offgrid alterou e salvou ${agent.appliedFiles.length} arquivo(s).`,
-          'Desfazer alterações'
-        );
-        if (action === 'Desfazer alterações') await vscode.commands.executeCommand('offgrid.undoLastAgentChanges');
+      if (agent.hasStagedChanges && !agent.hasPendingReview) {
+        agent.preparePendingReview('Alterações propostas pelo agente');
+      }
+      const review = agent.getPendingReview();
+      if (review) {
+        const requireReview = vscode.workspace.getConfiguration('offgrid').get('agentRequireReview', true);
+        if (requireReview) {
+          chat.showChangeReview(review);
+          chat.addMessage('system', 'Nenhum arquivo foi salvo ainda. Abra os diffs e escolha Aceitar alterações ou Rejeitar.');
+        } else {
+          const result = await agent.acceptPendingChanges();
+          chat.addMessage('system', `${result.files.length} arquivo(s) aceito(s) e salvo(s) automaticamente.`);
+        }
       }
     } catch (error) {
       if (error?.name !== 'AbortError') {
         chat.appendAssistant(`\n\n[Erro do agente: ${error instanceof Error ? error.message : String(error)}]`);
       }
     } finally {
-      agent.staged.clear();
+      if (!agent.hasPendingReview) agent.staged.clear();
       generationAbort = null;
       chat.finishAssistant();
       const options = await modelOptions();
@@ -332,9 +393,13 @@ function activate(context) {
     }
     chat.addMessage('user', mode === 'agent' ? `[Agente] ${text}` : text);
     if (!engine.isLoaded) {
-      chat.addMessage('system', 'Nenhum modelo carregado. Use “Gerenciar Modelos”.');
-      chat.finishAssistant();
-      return;
+      chat.addMessage('system', 'O modelo ainda não está carregado. Tentando carregar a configuração atual...');
+      const loaded = await loadConfiguredModel(true);
+      if (!loaded) {
+        chat.addMessage('system', 'Não foi possível carregar o modelo. Consulte Exibir → Saída → Offgrid.');
+        chat.finishAssistant();
+        return;
+      }
     }
 
     if (mode === 'agent') await runAgent(text);
@@ -343,13 +408,65 @@ function activate(context) {
 
   chat.onAbort(() => generationAbort?.abort());
 
+  chat.onAction(async message => {
+    try {
+      if (message.type === 'pinCurrent') {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || !canUseAsContext(editor.document.uri)) {
+          vscode.window.showWarningMessage('Abra um arquivo do workspace antes de fixá-lo.');
+          return;
+        }
+        setPinnedUri(editor.document.uri, true);
+      } else if (message.type === 'unpin') {
+        pinLocked = false;
+        pinnedUri = null;
+        followActiveEditor();
+        chat.setPinnedFile(relativePath(pinnedUri), false);
+      } else if (message.type === 'openPinned') {
+        if (pinnedUri) await vscode.window.showTextDocument(pinnedUri, { preview: false });
+      } else if (message.type === 'openDiff' && typeof message.filePath === 'string') {
+        await changePreview.open(agent.getPendingChange(message.filePath));
+      } else if (message.type === 'acceptChanges') {
+        const result = await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: 'Aplicando alterações aceitas do Offgrid',
+          cancellable: false
+        }, () => agent.acceptPendingChanges());
+        changePreview.clear();
+        chat.updateChangeReview('accepted', `${result.files.length} arquivo(s) aceito(s) e salvo(s).`);
+        const action = await vscode.window.showInformationMessage(
+          `Offgrid salvou ${result.files.length} arquivo(s).`,
+          'Desfazer alterações'
+        );
+        if (action === 'Desfazer alterações') await vscode.commands.executeCommand('offgrid.undoLastAgentChanges');
+      } else if (message.type === 'rejectChanges') {
+        const files = agent.rejectPendingChanges();
+        changePreview.clear();
+        chat.updateChangeReview('rejected', `${files.length} alteração(ões) rejeitada(s). Nenhum arquivo foi salvo.`);
+      }
+    } catch (error) {
+      const details = error instanceof Error ? error.stack || error.message : String(error);
+      log(`Erro em ação do chat: ${details}`);
+      vscode.window.showErrorMessage(`Offgrid: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chat, { webviewOptions: { retainContextWhenHidden: true } }),
+    vscode.workspace.registerTextDocumentContentProvider('offgrid-diff', changePreview),
     vscode.commands.registerCommand('offgrid.openChat', () => {
       vscode.commands.executeCommand('workbench.view.extension.offgrid');
     }),
     vscode.commands.registerCommand('offgrid.manageModels', manageModels),
     vscode.commands.registerCommand('offgrid.selectLocalModel', selectLocalModel),
+    vscode.commands.registerCommand('offgrid.reloadModel', () => loadConfiguredModel(true)),
+    vscode.commands.registerCommand('offgrid.pinActiveFile', () => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor && canUseAsContext(editor.document.uri)) setPinnedUri(editor.document.uri, true);
+    }),
+    vscode.commands.registerCommand('offgrid.unpinFile', () => {
+      pinLocked = false; pinnedUri = null; followActiveEditor(); chat.setPinnedFile(relativePath(pinnedUri), false);
+    }),
     vscode.commands.registerCommand('offgrid.setGithubToken', async () => {
       const token = await vscode.window.showInputBox({
         title: 'Token do GitHub',
@@ -378,6 +495,7 @@ function activate(context) {
         vscode.window.showErrorMessage(`Offgrid: ${error instanceof Error ? error.message : String(error)}`);
       }
     }),
+    vscode.window.onDidChangeActiveTextEditor(editor => followActiveEditor(editor)),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration('offgrid.modelPath')
         || event.affectsConfiguration('offgrid.gpu')
@@ -386,12 +504,15 @@ function activate(context) {
       }
     }),
     statusBar,
-    { dispose: () => engine.dispose() }
+    output,
+    { dispose: () => { changePreview.clear(); engine.dispose(); } }
   );
 
+  chat.setPinnedFile(relativePath(pinnedUri), pinLocked);
+  log(`Offgrid ${context.extension.packageJSON.version || ''} ativado.`);
   autoSelectBundledModel(context, catalog)
     .then(() => loadConfiguredModel(false))
-    .catch(error => console.error('[Offgrid] Falha na inicialização:', error));
+    .catch(error => log(`Falha na inicialização: ${error instanceof Error ? error.stack || error.message : String(error)}`));
 }
 
 
