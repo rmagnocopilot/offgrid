@@ -61,11 +61,11 @@ class WorkspaceAgent {
     };
   }
 
-  async createFunctions() {
-    const { defineChatSessionFunction } = await import('node-llama-cpp');
-
-    return {
-      listWorkspaceFiles: defineChatSessionFunction({
+  async createFunctions({ readOnly = false } = {}) {
+    // Retorna descritores serializáveis. O processo isolado do motor recria as
+    // funções do node-llama-cpp e encaminha cada chamada ao Extension Host.
+    const functions = {
+      listWorkspaceFiles: ({
         description: 'Lista arquivos de código do workspace. Não inclui node_modules. Use um glob específico quando possível.',
         params: {
           type: 'object',
@@ -77,7 +77,7 @@ class WorkspaceAgent {
         handler: async ({ pattern }) => this.listWorkspaceFiles(pattern)
       }),
 
-      searchWorkspaceText: defineChatSessionFunction({
+      searchWorkspaceText: ({
         description: 'Pesquisa texto nos arquivos do workspace, excluindo node_modules e .git. Retorna caminhos, linhas e trechos.',
         params: {
           type: 'object',
@@ -90,7 +90,7 @@ class WorkspaceAgent {
         handler: async ({ query, pattern }) => this.searchWorkspaceText(query, pattern)
       }),
 
-      searchDependencySource: defineChatSessionFunction({
+      searchDependencySource: ({
         description: 'Pesquisa somente dentro do pacote indicado em node_modules para entender APIs e comportamento. É estritamente somente leitura.',
         params: {
           type: 'object',
@@ -104,7 +104,7 @@ class WorkspaceAgent {
         handler: async ({ packageName, query, pattern }) => this.searchDependencySource(packageName, query, pattern)
       }),
 
-      readFile: defineChatSessionFunction({
+      readFile: ({
         description: 'Lê um arquivo texto do workspace por linhas. Pode ler node_modules, mas nunca modifica essa pasta.',
         params: {
           type: 'object',
@@ -118,7 +118,7 @@ class WorkspaceAgent {
         handler: async ({ filePath, startLine, endLine }) => this.readFile(filePath, startLine, endLine)
       }),
 
-      stageReplace: defineChatSessionFunction({
+      stageReplace: ({
         description: 'Prepara uma substituição exata em um arquivo do workspace. É proibido usar em node_modules ou .git. Não salva até applyChanges.',
         params: {
           type: 'object',
@@ -133,7 +133,7 @@ class WorkspaceAgent {
         handler: async ({ filePath, oldText, newText, replaceAll }) => this.stageReplace(filePath, oldText, newText, replaceAll)
       }),
 
-      stageFile: defineChatSessionFunction({
+      stageFile: ({
         description: 'Prepara o conteúdo completo de um arquivo novo ou existente. É proibido usar em node_modules ou .git. Prefira stageReplace em arquivos grandes.',
         params: {
           type: 'object',
@@ -146,7 +146,7 @@ class WorkspaceAgent {
         handler: async ({ filePath, content }) => this.stageFile(filePath, content)
       }),
 
-      applyChanges: defineChatSessionFunction({
+      applyChanges: ({
         description: 'Finaliza as alterações preparadas e envia para revisão do usuário. Não salva nada até o usuário aceitar no chat. Nunca grava em node_modules ou .git.',
         params: {
           type: 'object',
@@ -158,6 +158,13 @@ class WorkspaceAgent {
         handler: async ({ summary }) => this.applyChanges(summary)
       })
     };
+
+    if (readOnly) {
+      delete functions.stageReplace;
+      delete functions.stageFile;
+      delete functions.applyChanges;
+    }
+    return functions;
   }
 
   async listWorkspaceFiles(pattern) {

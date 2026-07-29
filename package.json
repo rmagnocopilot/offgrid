@@ -1,8 +1,8 @@
 {
   "name": "offgrid",
   "displayName": "Offgrid",
-  "description": "Assistente de programação local para VS Code com modelos GGUF distribuídos por GitHub Releases.",
-  "version": "1.2.0",
+  "description": "Assistente de programação local para VS Code, otimizado para Windows, com motor isolado, perfis de RAM/VRAM, sessões e modo Agente revisável.",
+  "version": "1.4.0",
   "publisher": "rmagnocopilot",
   "license": "MIT",
   "engines": {
@@ -29,7 +29,7 @@
   ],
   "main": "./src/extension.js",
   "scripts": {
-    "check": "node --check src/extension.js && node --check src/llama-engine.js && node --check src/model-installer.js && node --check src/chat-view.js && node --check src/workspace-agent.js && node --check src/agent-safety.js && node --check src/change-preview.js",
+    "check": "node --check src/extension.js && node --check src/llama-engine.js && node --check src/engine-client.js && node --check src/engine-worker.js && node --check src/resource-monitor.js && node --check src/hardware-profile.js && node --check src/model-installer.js && node --check src/chat-view.js && node --check src/workspace-agent.js && node --check src/agent-safety.js && node --check src/change-preview.js && node --check src/session-store.js",
     "configure": "node scripts/configure-repository.js",
     "package": "npx --yes @vscode/vsce package",
     "test": "node --test tests/*.test.js"
@@ -80,6 +80,21 @@
         "command": "offgrid.unpinFile",
         "title": "Offgrid: Voltar a Acompanhar a Aba Ativa",
         "icon": "$(pinned-dirty)"
+      },
+      {
+        "command": "offgrid.restartEngine",
+        "title": "Offgrid: Reiniciar Processo do Motor",
+        "icon": "$(server-process)"
+      },
+      {
+        "command": "offgrid.showResourceDiagnostics",
+        "title": "Offgrid: Mostrar RAM e VRAM",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "offgrid.clearHardwareProfile",
+        "title": "Offgrid: Limpar Perfil Automático de Hardware",
+        "icon": "$(trash)"
       }
     ],
     "viewsContainers": {
@@ -181,6 +196,23 @@
           "type": "boolean",
           "default": true,
           "description": "Exibe os arquivos alterados e exige aceitar ou rejeitar a proposta antes de salvar."
+        },
+        "offgrid.resourceMonitoring": {
+          "type": "boolean",
+          "default": true,
+          "description": "Monitora RAM e, no Windows, VRAM/orçamento de GPU. Em Linux/macOS a extensão continua funcionando com diagnóstico reduzido."
+        },
+        "offgrid.adaptiveGpu": {
+          "type": "boolean",
+          "default": true,
+          "description": "No Windows, escolhe backend e quantidade de GPU Layers com base na memória disponível e reaproveita o último perfil bem-sucedido."
+        },
+        "offgrid.resourceRefreshSeconds": {
+          "type": "number",
+          "default": 15,
+          "minimum": 5,
+          "maximum": 120,
+          "description": "Intervalo de atualização do painel de RAM/VRAM, em segundos."
         }
       }
     }
