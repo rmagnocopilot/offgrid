@@ -1,4 +1,5 @@
-import type { ChatSession, UiState } from '../../types/contracts';
+type ChatSession = import('../../types/contracts').ChatSession;
+type UiState = import('../../types/contracts').UiState;
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 

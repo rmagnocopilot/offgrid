@@ -110,7 +110,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         <button class="icon" id="unload" title="Descarregar modelo" aria-label="Descarregar modelo">⏏</button>
         <button class="icon" id="restart" title="Reiniciar motor" aria-label="Reiniciar motor">↻</button>
         <button class="icon" id="copyDiagnostics" title="Copiar diagnóstico" aria-label="Copiar diagnóstico">⧉</button>
-        <button class="icon" id="logs" title="Abrir logs" aria-label="Abrir logs">≡</button>
+		<button class="icon" id="logs" title="Abrir logs" aria-label="Abrir logs">▧</button>
       </div>
       <section class="status">
         <div class="status-line">
