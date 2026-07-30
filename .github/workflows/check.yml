@@ -1,17 +1,26 @@
-name: Verificar extensão
-
+name: Verificar Offgrid TypeScript
 on:
   push:
+    branches: [main]
   pull_request:
-
+  workflow_dispatch:
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm install --ignore-scripts
-      - run: npm run check
-      - run: npm test
+          node-version: '20'
+      - name: Instalar dependências
+        run: npm install
+      - name: Verificar TypeScript
+        run: npm run check
+      - name: Testar
+        run: npm test
+      - name: Empacotar
+        run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offgrid-vsix
+          path: '*.vsix'

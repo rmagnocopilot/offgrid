@@ -1,18 +1,5 @@
-Offgrid
+Offgrid 2.0.0
 
-This project is an independent compatible reimplementation inspired by the
-public Unplugged VS Code extension maintained at:
-https://github.com/marquesbmc/unplugged
-
-Model notices:
-
-Qwen2.5-Coder-3B-Instruct:
-Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT,
-Copyright (c) Alibaba Cloud. All Rights Reserved.
-Non-commercial research or evaluation only unless a separate commercial
-license has been obtained from Alibaba Cloud.
-
-Qwen2.5-Coder-7B-Instruct:
-Copyright 2024 Alibaba Cloud. Licensed under Apache License 2.0.
-
-The model weights are not covered by this repository's MIT license.
+Arquitetura TypeScript inspirada no projeto Unplugged, de marquesbmc, licenciado sob MIT.
+Esta implementação preserva o gerenciamento corporativo de modelos por GitHub Releases,
+o motor isolado, a interface responsiva e os diagnósticos do Offgrid.

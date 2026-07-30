@@ -1,0 +1,255 @@
+import * as fsp from 'node:fs/promises';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import * as vscode from 'vscode';
+import type { PendingFileChange, PendingReview, ToolCall, ToolResult } from '../types/contracts';
+import { normalizeRelativePath, isWriteProtectedPath, resolveInsideRoot, assertNoSymlinkEscape } from '../safety/PathSafety';
+import { ApprovalService } from '../safety/ApprovalService';
+import type { FileLogger } from '../diagnostics/FileLogger';
+
+const execFileAsync = promisify(execFile);
+const EXCLUDE = '**/{node_modules,.git,out,dist,build,coverage,.next,.nuxt,.cache,.venv,venv,target}/**';
+const DEFAULT_GLOB = '**/*.{js,cjs,mjs,jsx,ts,tsx,json,jsonc,css,scss,html,md,py,java,kt,kts,cs,go,rs,php,vue,svelte,yml,yaml,xml,sql,sh,ps1}';
+
+interface StagedEntry { content: string; original: string; existed: boolean; delete: boolean }
+
+export class WorkspaceTools {
+  private readonly staged = new Map<string, StagedEntry>();
+  private reviewSummary = '';
+  private memory: Array<{ title: string; content: string; type: string; date: string }> = [];
+  private readonly memoryFile?: string;
+
+  constructor(
+    private readonly workspaceRoot: string | undefined,
+    private readonly approval: ApprovalService,
+    private readonly logger: FileLogger
+  ) {
+    if (workspaceRoot) {
+      this.memoryFile = path.join(workspaceRoot, '.offgrid', 'memory.json');
+      this.loadMemory().catch(() => undefined);
+    }
+  }
+
+  get pendingReview(): PendingReview | undefined {
+    if (!this.staged.size || !this.reviewSummary) return undefined;
+    return { summary: this.reviewSummary, files: [...this.staged.keys()] };
+  }
+
+  async execute(call: ToolCall): Promise<ToolResult> {
+    const started = Date.now();
+    this.logger.info('agent', `[Tool] ${call.name} ${JSON.stringify(call.arguments)}`);
+    try {
+      const content = await this.dispatch(call.name, call.arguments);
+      const result: ToolResult = { callId: call.id, name: call.name, ok: true, content, durationMs: Date.now() - started };
+      this.logger.debug('agent', `[Perf] tool.${call.name}: ${result.durationMs} ms`);
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error('agent', `[Tool][ERRO] ${call.name}: ${message}`, error);
+      return { callId: call.id, name: call.name, ok: false, content: null, error: message, durationMs: Date.now() - started };
+    }
+  }
+
+  getChange(filePath: string): PendingFileChange {
+    const relative = normalizeRelativePath(filePath);
+    const entry = this.staged.get(relative);
+    if (!entry) throw new Error(`Alteração não encontrada: ${relative}`);
+    return { filePath: relative, originalContent: entry.original, proposedContent: entry.delete ? '' : entry.content, existed: entry.existed };
+  }
+
+  async acceptChanges(): Promise<string[]> {
+    this.requireWorkspace();
+    const files: string[] = [];
+    for (const [relative, entry] of this.staged) {
+      if (isWriteProtectedPath(relative)) throw new Error(`Escrita bloqueada: ${relative}`);
+      const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
+      assertNoSymlinkEscape(this.workspaceRoot!, absolute);
+      if (entry.existed) await this.backup(relative, entry.original);
+      if (entry.delete) await fsp.rm(absolute, { force: true });
+      else { await fsp.mkdir(path.dirname(absolute), { recursive: true }); await fsp.writeFile(absolute, entry.content, 'utf8'); }
+      files.push(relative);
+    }
+    this.staged.clear(); this.reviewSummary = '';
+    await vscode.commands.executeCommand('workbench.action.files.saveAll');
+    return files;
+  }
+
+  rejectChanges(): void { this.staged.clear(); this.reviewSummary = ''; }
+  reset(): void { this.rejectChanges(); }
+
+  private async dispatch(name: string, args: Record<string, unknown>): Promise<unknown> {
+    switch (name) {
+      case 'get_active_file': return this.activeFile();
+      case 'get_selection': return this.selection();
+      case 'list_files': return this.listFiles(String(args.pattern ?? DEFAULT_GLOB));
+      case 'list_directory_tree': return this.directoryTree(String(args.root ?? ''), Number(args.maxDepth ?? 4));
+      case 'read_file': return this.readFile(String(args.filePath), Number(args.startLine ?? 1), Number(args.endLine ?? 240));
+      case 'search_codebase': return this.search(String(args.query), String(args.pattern ?? DEFAULT_GLOB));
+      case 'get_diagnostics': return this.diagnostics(args.filePath ? String(args.filePath) : undefined);
+      case 'find_symbol': return this.symbols(String(args.query));
+      case 'find_definition': return this.locationCommand('vscode.executeDefinitionProvider', args);
+      case 'find_references': return this.locationCommand('vscode.executeReferenceProvider', args);
+      case 'get_hover': return this.locationCommand('vscode.executeHoverProvider', args);
+      case 'git_status': return this.git(['status','--short']);
+      case 'git_diff': return this.git(['diff','--', ...(args.filePath ? [String(args.filePath)] : [])]);
+      case 'get_memory': return this.getMemory(String(args.query ?? ''));
+      case 'save_memory': return this.saveMemory(String(args.title), String(args.content), String(args.type ?? 'decision'));
+      case 'apply_edit': return this.applyEdit(args);
+      case 'create_file': return this.stageFile(String(args.filePath), String(args.content ?? ''), false);
+      case 'delete_file': return this.stageDelete(String(args.filePath));
+      case 'run_terminal': return this.runTerminal(String(args.command));
+      case 'apply_changes': {
+        if (!this.staged.size) throw new Error('Nenhuma alteração foi preparada para revisão.');
+        this.reviewSummary = String(args.summary || 'Alterações propostas pelo Agente');
+        return this.pendingReview;
+      }
+      default: throw new Error(`Ferramenta desconhecida: ${name}`);
+    }
+  }
+
+  private activeFile(): unknown {
+    const editor = vscode.window.activeTextEditor;
+    return editor ? { filePath: vscode.workspace.asRelativePath(editor.document.uri, true), language: editor.document.languageId } : { filePath: null };
+  }
+  private selection(): unknown {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return { filePath: null, text: '' };
+    return { filePath: vscode.workspace.asRelativePath(editor.document.uri, true), text: editor.document.getText(editor.selection), startLine: editor.selection.start.line + 1, endLine: editor.selection.end.line + 1 };
+  }
+  private async listFiles(pattern: string): Promise<unknown> {
+    const uris = await vscode.workspace.findFiles(pattern || DEFAULT_GLOB, EXCLUDE, 300);
+    return { count: uris.length, files: uris.map((uri: vscode.Uri) => vscode.workspace.asRelativePath(uri, true)).sort() };
+  }
+  private async directoryTree(root: string, maxDepth: number): Promise<unknown> {
+    this.requireWorkspace();
+    const start = root ? resolveInsideRoot(this.workspaceRoot!, root) : this.workspaceRoot!;
+    const lines: string[] = [];
+    const walk = async (directory: string, depth: number): Promise<void> => {
+      if (depth > Math.max(1, Math.min(8, maxDepth))) return;
+      const entries = await fsp.readdir(directory, { withFileTypes: true });
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (['node_modules','.git','out','dist','build','.cache'].includes(entry.name)) continue;
+        const absolute = path.join(directory, entry.name);
+        const relative = path.relative(this.workspaceRoot!, absolute).replace(/\\/g, '/');
+        lines.push(`${'  '.repeat(depth)}${entry.isDirectory() ? '📁' : '📄'} ${relative}`);
+        if (entry.isDirectory() && lines.length < 500) await walk(absolute, depth + 1);
+        if (lines.length >= 500) return;
+      }
+    };
+    await walk(start, 0);
+    return { tree: lines };
+  }
+  private async readFile(filePath: string, startLine: number, endLine: number): Promise<unknown> {
+    this.requireWorkspace();
+    const relative = normalizeRelativePath(filePath);
+    const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
+    const staged = this.staged.get(relative);
+    const content = staged ? staged.content : await fsp.readFile(absolute, 'utf8');
+    const lines = content.split(/\r?\n/);
+    const from = Math.max(1, startLine || 1), to = Math.min(lines.length, Math.max(from, endLine || from + 239));
+    return { filePath: relative, startLine: from, endLine: to, totalLines: lines.length, content: lines.slice(from - 1, to).map((line, index) => `${from + index}: ${line}`).join('\n') };
+  }
+  private async search(query: string, pattern: string): Promise<unknown> {
+    const files = await vscode.workspace.findFiles(pattern || DEFAULT_GLOB, EXCLUDE, 220);
+    const regex = safeRegex(query);
+    const matches: unknown[] = [];
+    for (const uri of files) {
+      if (matches.length >= 80) break;
+      let text = ''; try { text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8'); } catch { continue; }
+      text.split(/\r?\n/).forEach((line, index) => { if (matches.length < 80 && regex.test(line)) matches.push({ filePath: vscode.workspace.asRelativePath(uri, true), line: index + 1, text: line.slice(0, 500) }); regex.lastIndex = 0; });
+    }
+    return { query, count: matches.length, matches };
+  }
+  private diagnostics(filePath?: string): unknown {
+    if (filePath && this.workspaceRoot) {
+      const entries = vscode.languages.getDiagnostics(vscode.Uri.file(resolveInsideRoot(this.workspaceRoot, filePath)));
+      return entries.map(item => ({ severity: item.severity, message: item.message, line: item.range.start.line + 1 }));
+    }
+    const entries = vscode.languages.getDiagnostics();
+    return entries.slice(0, 100).map(([uri, items]) => ({ filePath: vscode.workspace.asRelativePath(uri, true), diagnostics: items.slice(0, 20).map(item => ({ severity: item.severity, message: item.message, line: item.range.start.line + 1 })) }));
+  }
+  private async symbols(query: string): Promise<unknown> { return await vscode.commands.executeCommand('vscode.executeWorkspaceSymbolProvider', query); }
+  private async locationCommand(command: string, args: Record<string, unknown>): Promise<unknown> {
+    this.requireWorkspace();
+    const uri = vscode.Uri.file(resolveInsideRoot(this.workspaceRoot!, String(args.filePath)));
+    const position = new vscode.Position(Math.max(0, Number(args.line) - 1), Math.max(0, Number(args.character) - 1));
+    return await vscode.commands.executeCommand(command, uri, position);
+  }
+  private async git(args: string[]): Promise<unknown> {
+    this.requireWorkspace();
+    const { stdout, stderr } = await execFileAsync('git', args, { cwd: this.workspaceRoot, encoding: 'utf8', timeout: 15_000, maxBuffer: 2 * 1024 * 1024 });
+    return { stdout, stderr };
+  }
+  private getMemory(query: string): unknown {
+    const needle = query.toLowerCase();
+    return this.memory.filter(item => !needle || `${item.title} ${item.content} ${item.type}`.toLowerCase().includes(needle)).slice(-30);
+  }
+  private async saveMemory(title: string, content: string, type: string): Promise<unknown> {
+    if (!this.memoryFile) throw new Error('Abra um workspace para usar memória.');
+    if (!await this.approval.confirmPersistentWrite('Salvar memória do projeto', title)) throw new Error('Memória rejeitada pelo usuário.');
+    this.memory.push({ title, content, type, date: new Date().toISOString() });
+    await fsp.mkdir(path.dirname(this.memoryFile), { recursive: true });
+    await fsp.writeFile(this.memoryFile, JSON.stringify(this.memory, null, 2), 'utf8');
+    return { saved: true, title };
+  }
+  private async applyEdit(args: Record<string, unknown>): Promise<unknown> {
+    const filePath = String(args.filePath), oldText = String(args.oldText), newText = String(args.newText), replaceAll = Boolean(args.replaceAll);
+    const current = await this.currentContent(filePath);
+    if (!current.includes(oldText)) throw new Error(`Texto original não encontrado em ${filePath}.`);
+    const content = replaceAll ? current.split(oldText).join(newText) : current.replace(oldText, newText);
+    return this.stageFile(filePath, content, true);
+  }
+  private async stageFile(filePath: string, content: string, existedExpected: boolean): Promise<unknown> {
+    this.requireWorkspace();
+    const relative = normalizeRelativePath(filePath);
+    if (isWriteProtectedPath(relative)) throw new Error(`Escrita bloqueada em ${relative}.`);
+    const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
+    assertNoSymlinkEscape(this.workspaceRoot!, absolute);
+    const existed = fs.existsSync(absolute);
+    if (existedExpected && !existed) throw new Error(`Arquivo não encontrado: ${relative}`);
+    const original = existed ? await fsp.readFile(absolute, 'utf8') : '';
+    const approved = await this.approval.confirmWrite('Preparar alteração', relative);
+    if (!approved) throw new Error('Alteração rejeitada pelo usuário.');
+    this.staged.set(relative, { content, original, existed, delete: false });
+    return { staged: true, filePath: relative };
+  }
+  private async stageDelete(filePath: string): Promise<unknown> {
+    const relative = normalizeRelativePath(filePath);
+    if (isWriteProtectedPath(relative)) throw new Error(`Exclusão bloqueada em ${relative}.`);
+    this.requireWorkspace();
+    const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
+    assertNoSymlinkEscape(this.workspaceRoot!, absolute);
+    const original = await this.currentContent(relative);
+    const approved = await this.approval.confirmWrite('Preparar exclusão', relative);
+    if (!approved) throw new Error('Exclusão rejeitada pelo usuário.');
+    this.staged.set(relative, { content: '', original, existed: true, delete: true });
+    return { staged: true, delete: true, filePath: relative };
+  }
+  private async runTerminal(command: string): Promise<unknown> {
+    this.requireWorkspace();
+    if (!await this.approval.confirmTerminal(command)) throw new Error('Comando rejeitado pelo usuário.');
+    const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/sh';
+    const args = process.platform === 'win32' ? ['-NoProfile','-Command',command] : ['-lc', command];
+    const { stdout, stderr } = await execFileAsync(shell, args, { cwd: this.workspaceRoot, encoding: 'utf8', timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+    return { stdout, stderr };
+  }
+  private async currentContent(filePath: string): Promise<string> {
+    this.requireWorkspace();
+    const relative = normalizeRelativePath(filePath);
+    const staged = this.staged.get(relative);
+    if (staged) return staged.content;
+    return fsp.readFile(resolveInsideRoot(this.workspaceRoot!, relative), 'utf8');
+  }
+  private async backup(relative: string, content: string): Promise<void> {
+    const dir = path.join(this.workspaceRoot!, '.offgrid', 'backups', new Date().toISOString().replace(/[:.]/g, '-'));
+    const destination = path.join(dir, relative);
+    await fsp.mkdir(path.dirname(destination), { recursive: true });
+    await fsp.writeFile(destination, content, 'utf8');
+  }
+  private async loadMemory(): Promise<void> { if (this.memoryFile) try { this.memory = JSON.parse(await fsp.readFile(this.memoryFile, 'utf8')); } catch { this.memory = []; } }
+  private requireWorkspace(): void { if (!this.workspaceRoot) throw new Error('Nenhum workspace aberto.'); }
+}
+
+function safeRegex(query: string): RegExp { try { return new RegExp(query, 'i'); } catch { return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); } }

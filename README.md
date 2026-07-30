@@ -1,123 +1,112 @@
-# Offgrid
+# Offgrid 2.0
 
-> **Otimizado para Windows 10/11 x64.** No Windows, o Offgrid mede RAM, consulta VRAM quando o driver permite e adapta backend/GPU Layers. Em Linux e macOS, Chat, Planejar, Somente leitura e Agente continuam funcionando; apenas a medição avançada de VRAM e o autoajuste baseado no Windows ficam indisponíveis.
+Assistente local e offline para Visual Studio Code, reescrito em **TypeScript**. A arquitetura segue a separação usada pelo Unplugged entre Agente, ferramentas, contexto, segurança, motor LLM e interface, preservando os recursos adicionais construídos no Offgrid.
 
-Assistente local para Visual Studio Code com modelos GGUF. A inferência ocorre no computador; o conteúdo do workspace não é enviado a serviços externos durante o chat.
+## Abrir o Offgrid
 
-## Modelos incluídos no catálogo
+Após instalar o VSIX, clique no ícone **Offgrid** na Activity Bar, a barra vertical esquerda do VS Code. Também é possível clicar no status `Offgrid` na barra inferior ou executar `Offgrid: Abrir Chat`.
 
-| Modelo | Uso recomendado | Tamanho aproximado |
-|---|---|---:|
-| Qwen2.5-Coder-3B-Instruct Q4_K_M | Máquinas mais limitadas e respostas rápidas | 2,1 GB |
-| Qwen2.5-Coder-7B-Instruct Q4_K_M | Tarefas mais complexas de Angular, Java e refatoração | 4,7 GB |
+Na primeira instalação, o painel é aberto uma única vez para apresentar o seletor de modelos.
 
-O seletor no topo do chat diferencia **não instalado**, **instalado**, **ativo** e **carregado**. O Offgrid mantém no máximo um modelo carregado em memória.
+## Modos
 
-## Offgrid 1.5 — estabilização e diagnóstico
+- **Chat:** conversa comum, com contexto opcional de arquivos.
+- **Planejar:** pesquisa o workspace e propõe um plano, sem ferramentas de escrita.
+- **Somente leitura:** permite pesquisa, símbolos, referências, Git e diagnósticos, sem escrita.
+- **Agente:** executa ferramentas reais, prepara alterações e mostra diff antes de salvar.
 
-- Loop real de ferramentas do Agente: chamadas como `listWorkspaceFiles` e `readWorkspaceFile` são executadas, e o resultado volta ao modelo.
-- Arquivos citados pelo usuário têm prioridade sobre seleção ativa, arquivo fixado e busca geral.
-- Modos separados: **Chat**, **Planejar**, **Somente leitura** e **Agente**.
-- Descarregamento verificável de sessão, contexto, modelo e runtime, com confirmação visual e logs de cada etapa.
-- Estados consistentes do motor: não iniciado, carregando, pronto, descarregando, descarregado e erro.
-- Interface responsiva e diagnóstico configurável como `hidden`, `compact`, `expanded` ou `onError`.
-- Histórico local de sessões com busca, renomear, fixar, duplicar e excluir.
-- Seletor de modelo no chat, rollback para o último modelo funcional e fallback progressivo Vulkan → menos GPU Layers → CPU.
-- Logs UTF-8 no Output Channel e em arquivos rotativos.
-- Botão **Copiar diagnóstico** com ambiente, modelo, backend, memória, último erro e últimas linhas do log.
-- Revisão visual por diff antes de salvar alterações do Agente.
+O Agente é implementado em TypeScript/Node.js usando a API do VS Code. Python não é necessário.
+
+## Interface
+
+- histórico lateral de sessões;
+- seletor de modelo no topo;
+- arquivo atual ou fixado;
+- contexto adicional por arquivo e seleção;
+- painel de diagnóstico `hidden`, `compact`, `expanded` ou `onError`;
+- layout responsivo para barras laterais estreitas;
+- diff nativo com aceitar ou rejeitar;
+- botão para copiar diagnóstico;
+- item de status clicável.
+
+## Modelos
+
+Os modelos são baixados dos GitHub Releases do próprio repositório Offgrid, evitando dependência direta do domínio de hospedagem original durante a instalação corporativa.
+
+Estados exibidos:
+
+- não instalado;
+- instalado no disco;
+- ativo;
+- carregado na memória;
+- erro.
+
+Somente um modelo fica carregado. A troca descarrega o anterior antes da nova carga.
 
 ## Windows, Linux e macOS
 
-### Windows
+O Chat, o Agente, as sessões e a revisão funcionam nos sistemas suportados pelo runtime do `node-llama-cpp`.
 
-Todos os recursos ficam disponíveis quando o hardware e o driver expõem os dados:
+**Recursos avançados de RAM/VRAM são otimizados para Windows:**
 
-- RAM total, disponível e consumo do processo isolado;
-- GPU e VRAM por `nvidia-smi` ou informações do Windows;
-- perfis adaptativos por máquina e modelo;
-- redução progressiva de GPU Layers;
-- fallback automático para CPU.
+- RAM total, livre e memória do processo isolado;
+- NVIDIA via `nvidia-smi`;
+- inventário de GPU por CIM como estimativa;
+- cálculo com `Int64` para placas com 2 GB ou mais;
+- GPU Layers progressivas;
+- fallback para CPU;
+- perfil funcional por máquina e modelo.
 
-### Linux e macOS
+No Linux e macOS, falhas de telemetria não impedem o Offgrid de iniciar. O motor usa a detecção padrão e pode fazer fallback para CPU.
 
-A extensão não deve falhar por estar fora do Windows. Continuam disponíveis:
+## Segurança
 
-- modelos GGUF, Chat e os três modos de análise/agente;
-- RAM genérica e RAM do processo do motor;
-- backend manual ou detecção padrão do `node-llama-cpp`;
-- sessões, contexto, ferramentas e revisão por diff.
+- `node_modules` e `.git` são somente leitura;
+- caminhos absolutos e saídas do workspace são bloqueados;
+- links simbólicos que escapam do workspace são rejeitados;
+- no modo `ask`, alterações ficam apenas preparadas até o usuário aceitar o diff;
+- backups são criados antes de substituir ou excluir arquivos existentes;
+- terminal e memória persistente pedem confirmação quando necessário.
 
-Ficam indisponíveis somente a VRAM avançada do Windows e o perfil adaptativo orientado por essa medição.
+## Desenvolvimento
 
-## Instalação
+Requisitos:
 
-1. Em **Releases**, baixe o `.vsix` mais recente.
-2. No VS Code, abra **Extensões → ... → Install from VSIX...**.
-3. Reinicie o VS Code.
-4. Abra o painel Offgrid e escolha um modelo no seletor superior.
+- Node.js 20 ou superior;
+- npm;
+- VS Code 1.85 ou superior.
 
-## Configuração recomendada para diagnóstico inicial no Windows
-
-```json
-{
-  "offgrid.gpu": "auto",
-  "offgrid.gpuLayers": "auto",
-  "offgrid.adaptiveGpu": true,
-  "offgrid.fallbackToCpu": true,
-  "offgrid.resourceMonitoring": true,
-  "offgrid.resourceRefreshSeconds": 15,
-  "offgrid.contextSize": 4096,
-  "offgrid.maxAgentSteps": 10,
-  "offgrid.diagnosticsPanel": "compact",
-  "offgrid.logLevel": "debug",
-  "offgrid.diagnosticMode": false,
-  "offgrid.agentApprovalMode": "ask"
-}
+```powershell
+npm install
+npm run check
+npm test
+npm run compile
 ```
 
-`offgrid.diagnosticMode` registra stack traces, prévias de prompts, caminhos e resultados de ferramentas. Ative apenas durante depuração, pois os logs podem conter partes do código e nomes de arquivos.
+Abra a pasta do repositório no VS Code e pressione `F5`. A configuração `Executar Offgrid (TypeScript)` inicia o **Extension Development Host**.
 
-## Agente e contexto
+Para testar a interface sem carregar um GGUF:
 
-Prioridade usada pelo Agente:
+1. Pressione `Ctrl+Shift+P`.
+2. Execute `Offgrid: Alternar Modo Visual Simulado`.
+3. Abra o ícone Offgrid na Activity Bar.
 
-1. arquivos citados diretamente no pedido;
-2. seleção ativa;
-3. arquivo fixado ou aba atual;
-4. arquivos relacionados;
-5. busca geral no workspace.
+O simulador mostra modelo, sessões, RAM/VRAM e revisão fictícia sem alterar arquivos.
 
-No modo **Agente**, as mudanças ficam preparadas para revisão. Clique no arquivo para abrir o diff nativo do VS Code e escolha **Aceitar alterações** ou **Rejeitar**. `.git`, `node_modules` e caminhos fora do workspace permanecem protegidos contra escrita.
+## Empacotar
 
-## Logs e diagnóstico
+```powershell
+npm run package
+```
 
-Abra **Exibir → Saída → Offgrid**. Os arquivos de log ficam na pasta de armazenamento global da extensão, dentro de `logs`, separados por categoria:
+Arquivo esperado:
 
-- `offgrid-AAAA-MM-DD.log`;
-- `agent-AAAA-MM-DD.log`;
-- `model-AAAA-MM-DD.log`;
-- `diagnostics-AAAA-MM-DD.log`.
+```text
+offgrid-2.0.0.vsix
+```
 
-Cada categoria mantém até 10 arquivos, com rotação a partir de 10 MB.
+Os modelos em `globalStorage/rmagnocopilot.offgrid/models` permanecem após a atualização do VSIX.
 
-Comandos úteis:
+## Logs
 
-- `Offgrid: Copiar Diagnóstico Completo`
-- `Offgrid: Abrir Pasta de Logs`
-- `Offgrid: Mostrar RAM e VRAM`
-- `Offgrid: Mostrar Diagnóstico do Modelo`
-- `Offgrid: Mostrar Diagnóstico do Agente`
-- `Offgrid: Reiniciar Processo do Motor`
-- `Offgrid: Liberar Modelo da Memória`
-- `Offgrid: Limpar Perfil Automático de Hardware`
-
-## Processo isolado
-
-O `node-llama-cpp` roda em um processo separado do Extension Host. O comando de descarregamento libera sessão, contexto, modelo e runtime dentro desse processo. O comando de reinício encerra e recria o processo inteiro quando for necessário recuperar uma falha nativa.
-
-## Licenças
-
-- Código: MIT.
-- Qwen2.5-Coder-7B-Instruct: Apache-2.0.
-- Qwen2.5-Coder-3B-Instruct: Qwen Research License.
+O canal `Exibir → Saída → Offgrid` e a pasta de logs registram motor, modelos, Agente e diagnósticos. Os arquivos são UTF-8, giram em 10 MB e mantêm até dez arquivos por categoria.

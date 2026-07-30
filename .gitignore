@@ -1,7 +1,6 @@
 node_modules/
+out/
 *.vsix
+*.log
 .DS_Store
-models/*.gguf
-models/*.part-*
-models/downloads/
 coverage/
