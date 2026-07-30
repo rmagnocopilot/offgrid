@@ -110,3 +110,45 @@ test('reconhece mensagens comuns de falta de memória de GPU', () => {
   assert.equal(isDeviceMemoryError(new Error('failed to allocate Vulkan1 buffer')), true);
   assert.equal(isDeviceMemoryError(new Error('arquivo não encontrado')), false);
 });
+
+test('descarregamento libera sessão, contexto, modelo e runtime com relatório', async () => {
+  const { dir, modelPath } = await temporaryModel();
+  const disposed = [];
+  const logs = [];
+  class FakeSession {
+    async setChatHistory() {}
+    async prompt() { return 'ok'; }
+    async dispose() { disposed.push('session'); }
+  }
+  const context = {
+    getSequence() { return {}; },
+    async dispose() { disposed.push('context'); }
+  };
+  const model = {
+    async createContext() { return context; },
+    async dispose() { disposed.push('model'); }
+  };
+  const llama = {
+    gpu: 'vulkan',
+    async loadModel() { return model; },
+    async dispose() { disposed.push('llama/runtime'); }
+  };
+  const engine = new LlamaEngine(message => logs.push(String(message)), async () => ({
+    getLlama: async () => llama,
+    LlamaChatSession: FakeSession,
+    LlamaLogLevel: { warn: 'warn' }
+  }));
+  try {
+    await engine.load({ modelPath, gpu: 'auto', gpuLayers: 'auto', fallbackToCpu: true, contextSize: 4096, maxTokens: 128, temperature: 0.2 }, 'sistema');
+    const report = await engine.unload();
+    assert.deepEqual(disposed, ['session', 'context', 'model', 'llama/runtime']);
+    assert.equal(engine.isLoaded, false);
+    assert.equal(engine.diagnostics.engineState, 'unloaded');
+    assert.equal(report.errors.length, 0);
+    assert.match(logs.join('\n'), /Estado interno limpo/);
+    assert.match(logs.join('\n'), /Modelo descarregado com sucesso/);
+  } finally {
+    await engine.dispose();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

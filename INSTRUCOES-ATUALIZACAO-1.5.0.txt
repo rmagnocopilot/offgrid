@@ -1,0 +1,73 @@
+OFFGRID 1.5.0 — ATUALIZAÇÃO CONSOLIDADA
+
+Esta atualização inclui todos os arquivos necessários da versão 1.4 e da versão 1.5 para evitar pacotes incompletos.
+
+1. Feche o VS Code, o GitHub Desktop e terminais abertos no repositório.
+
+2. Faça uma cópia de segurança de:
+   C:\Users\rafae\Documents\GitHub\offgrid
+
+3. Extraia offgrid-update-v1.5.0.zip.
+
+4. Copie TODO o conteúdo interno da pasta extraída para a raiz do repositório:
+   C:\Users\rafae\Documents\GitHub\offgrid
+
+5. Confirme Mesclar pastas e Substituir arquivos no destino.
+
+6. Abra o PowerShell na raiz do repositório e execute:
+   node scripts/apply-v1.5-update.js
+
+   O script verifica todos os arquivos obrigatórios antes de atualizar package.json e package-lock.json.
+   Resultado esperado:
+   Arquivos da atualização verificados: 35/35.
+   Offgrid atualizado para 1.5.0.
+
+7. Execute:
+   npm run check
+
+8. Execute:
+   npm test
+
+   Resultado esperado no pacote validado:
+   tests 31
+   fail 0
+
+   No Windows, um teste de link simbólico pode ser ignorado por falta de permissão. O critério obrigatório é fail 0.
+
+9. Gere o VSIX:
+   npm run package
+
+10. Confirme:
+    Test-Path .\offgrid-1.5.0.vsix
+
+11. Confira tamanho e data:
+    Get-Item .\offgrid-1.5.0.vsix | Select-Object Name, Length, LastWriteTime
+
+12. GitHub Desktop:
+    Summary: Estabiliza Agente, modelos e diagnóstico detalhado
+    Commit to main
+    Push origin
+
+13. GitHub Release:
+    Tag: extension-v1.5.0
+    Título: Offgrid 1.5.0 — Estabilização e diagnóstico
+    Asset: offgrid-1.5.0.vsix
+
+Não republique os modelos 3B e 7B.
+
+CONFIGURAÇÃO RECOMENDADA PARA OS PRIMEIROS TESTES
+
+{
+  "offgrid.gpu": "auto",
+  "offgrid.gpuLayers": "auto",
+  "offgrid.adaptiveGpu": true,
+  "offgrid.fallbackToCpu": true,
+  "offgrid.contextSize": 4096,
+  "offgrid.maxAgentSteps": 10,
+  "offgrid.diagnosticsPanel": "expanded",
+  "offgrid.logLevel": "trace",
+  "offgrid.diagnosticMode": true,
+  "offgrid.agentApprovalMode": "ask"
+}
+
+ATENÇÃO: diagnosticMode=true pode registrar caminhos, prompts e trechos de código. Depois dos testes, volte para false e logLevel=debug.

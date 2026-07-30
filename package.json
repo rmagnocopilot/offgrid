@@ -1,8 +1,8 @@
 {
   "name": "offgrid",
   "displayName": "Offgrid",
-  "description": "Assistente de programação local para VS Code, otimizado para Windows, com motor isolado, perfis de RAM/VRAM, sessões e modo Agente revisável.",
-  "version": "1.4.0",
+  "description": "Assistente de programação local para VS Code, otimizado para Windows, com Agente por ferramentas, logs de diagnóstico, modelos gerenciáveis e revisão visual.",
+  "version": "1.5.0",
   "publisher": "rmagnocopilot",
   "license": "MIT",
   "engines": {
@@ -29,7 +29,7 @@
   ],
   "main": "./src/extension.js",
   "scripts": {
-    "check": "node --check src/extension.js && node --check src/llama-engine.js && node --check src/engine-client.js && node --check src/engine-worker.js && node --check src/resource-monitor.js && node --check src/hardware-profile.js && node --check src/model-installer.js && node --check src/chat-view.js && node --check src/workspace-agent.js && node --check src/agent-safety.js && node --check src/change-preview.js && node --check src/session-store.js",
+    "check": "node --check src/extension.js && node --check src/llama-engine.js && node --check src/engine-client.js && node --check src/engine-worker.js && node --check src/resource-monitor.js && node --check src/hardware-profile.js && node --check src/model-installer.js && node --check src/model-catalog.js && node --check src/chat-view.js && node --check src/workspace-agent.js && node --check src/agent-safety.js && node --check src/change-preview.js && node --check src/session-store.js && node --check src/agent-tool-loop.js && node --check src/agent-context.js && node --check src/file-logger.js",
     "configure": "node scripts/configure-repository.js",
     "package": "npx --yes @vscode/vsce package",
     "test": "node --test tests/*.test.js"
@@ -95,6 +95,26 @@
         "command": "offgrid.clearHardwareProfile",
         "title": "Offgrid: Limpar Perfil Automático de Hardware",
         "icon": "$(trash)"
+      },
+      {
+        "command": "offgrid.copyDiagnostics",
+        "title": "Offgrid: Copiar Diagnóstico Completo",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "offgrid.openLogsFolder",
+        "title": "Offgrid: Abrir Pasta de Logs",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "offgrid.unloadModel",
+        "title": "Offgrid: Liberar Modelo da Memória",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "offgrid.showAgentDiagnostics",
+        "title": "Offgrid: Mostrar Diagnóstico do Agente",
+        "icon": "$(bug)"
       }
     ],
     "viewsContainers": {
@@ -213,6 +233,47 @@
           "minimum": 5,
           "maximum": 120,
           "description": "Intervalo de atualização do painel de RAM/VRAM, em segundos."
+        },
+        "offgrid.maxAgentSteps": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 30,
+          "description": "Número máximo de etapas de ferramentas executadas por uma tarefa do Agente."
+        },
+        "offgrid.diagnosticsPanel": {
+          "type": "string",
+          "enum": [
+            "hidden",
+            "compact",
+            "expanded",
+            "onError"
+          ],
+          "enumDescriptions": [
+            "Oculta o diagnóstico no chat.",
+            "Exibe uma linha resumida.",
+            "Exibe todos os dados de modelo, motor, RAM e GPU.",
+            "Exibe detalhes somente quando houver erro."
+          ],
+          "default": "compact",
+          "description": "Controla a visibilidade do diagnóstico no painel do chat."
+        },
+        "offgrid.logLevel": {
+          "type": "string",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "default": "debug",
+          "description": "Nível mínimo gravado no Output e nos arquivos de log. A versão 1.5 usa debug por padrão para facilitar diagnóstico."
+        },
+        "offgrid.diagnosticMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Ativa logs trace, stack traces, prévias de prompts e resultados de ferramentas. Pode registrar caminhos e trechos de código; use somente durante depuração."
         }
       }
     }

@@ -1,5 +1,6 @@
 .github/**
 .vscode/**
+.editorconfig
 scripts/**
 tests/**
 models/*.gguf
@@ -7,4 +8,7 @@ models/*.part-*
 MODEL_RELEASE.md
 .gitignore
 *.vsix
+*.sha256
+*-file-report.txt
 INSTRUCOES-ATUALIZACAO*.txt
+UPDATE-MANIFEST*.txt

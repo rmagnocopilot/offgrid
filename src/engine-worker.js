@@ -15,7 +15,8 @@ function serializeError(error) {
   return {
     name: error?.name || 'Error',
     message: error instanceof Error ? error.message : String(error),
-    stack: error instanceof Error ? error.stack || '' : ''
+    stack: error instanceof Error ? error.stack || '' : '',
+    details: error?.details || null
   };
 }
 
@@ -34,10 +35,19 @@ async function buildFunctions(requestId, definitions = {}) {
     params: definition.params,
     handler: args => new Promise((resolve, rejectTool) => {
       const callId = `${requestId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      pendingTools.set(callId, { resolve, reject: rejectTool });
+      pendingTools.set(callId, { resolve, reject: rejectTool, requestId, name });
+      logger(`[Agent] Tool call nativa detectada: ${name}.`);
       process.send?.({ type: 'toolCall', requestId, callId, name, args });
     })
   })]));
+}
+
+function cleanupPendingTools(requestId, error = null) {
+  for (const [callId, pending] of pendingTools.entries()) {
+    if (pending.requestId !== requestId) continue;
+    pendingTools.delete(callId);
+    if (error) pending.reject(error);
+  }
 }
 
 async function handleRequest(message) {
@@ -54,6 +64,19 @@ async function handleRequest(message) {
         onChunk: chunk => process.send?.({ type: 'chunk', requestId, chunk })
       });
       reply(requestId, result);
+    } else if (method === 'agentStart') {
+      reply(requestId, await engine.startAgent());
+    } else if (method === 'agentStep') {
+      const functions = await buildFunctions(requestId, params.functionDefinitions);
+      const result = await engine.runAgentStep(params.text, {
+        ...params.options,
+        functions,
+        signal: controller.signal,
+        onChunk: chunk => process.send?.({ type: 'chunk', requestId, chunk })
+      });
+      reply(requestId, result);
+    } else if (method === 'agentFinish') {
+      reply(requestId, await engine.finishAgent());
     } else if (method === 'runAgent') {
       const functions = await buildFunctions(requestId, params.functionDefinitions);
       const result = await engine.runAgent(params.text, {
@@ -67,10 +90,31 @@ async function handleRequest(message) {
       await engine.clearHistory();
       reply(requestId, true);
     } else if (method === 'unload') {
-      await engine.unload();
-      reply(requestId, engine.diagnostics);
+      const report = await engine.unload();
+      const memory = process.memoryUsage();
+      reply(requestId, {
+        ...report,
+        processMemory: {
+          rssBytes: memory.rss,
+          heapUsedBytes: memory.heapUsed,
+          heapTotalBytes: memory.heapTotal,
+          externalBytes: memory.external,
+          arrayBuffersBytes: memory.arrayBuffers
+        }
+      });
     } else if (method === 'diagnostics') {
-      reply(requestId, { ...engine.diagnostics, processMemory: process.memoryUsage(), pid: process.pid });
+      const memory = process.memoryUsage();
+      reply(requestId, {
+        ...engine.diagnostics,
+        processMemory: {
+          rssBytes: memory.rss,
+          heapUsedBytes: memory.heapUsed,
+          heapTotalBytes: memory.heapTotal,
+          externalBytes: memory.external,
+          arrayBuffersBytes: memory.arrayBuffers
+        },
+        pid: process.pid
+      });
     } else if (method === 'dispose') {
       await engine.dispose();
       reply(requestId, true);
@@ -82,6 +126,7 @@ async function handleRequest(message) {
     reject(requestId, error);
   } finally {
     requestAbortControllers.delete(requestId);
+    cleanupPendingTools(requestId, Object.assign(new Error('A chamada da ferramenta foi encerrada junto com a etapa do agente.'), { name: 'AbortError' }));
   }
 }
 
@@ -91,6 +136,7 @@ process.on('message', message => {
     handleRequest(message).catch(error => reject(message.requestId, error));
   } else if (message.type === 'cancel') {
     requestAbortControllers.get(message.requestId)?.abort();
+    cleanupPendingTools(message.requestId, Object.assign(new Error('Operação cancelada.'), { name: 'AbortError' }));
   } else if (message.type === 'toolResult') {
     const pending = pendingTools.get(message.callId);
     if (!pending) return;

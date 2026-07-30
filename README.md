@@ -1,73 +1,63 @@
 # Offgrid
 
-> **Otimizado para Windows 10/11 x64.** No Windows, o Offgrid mede RAM, consulta VRAM quando o driver permite, escolhe um perfil de GPU/CPU e executa o modelo em um processo separado. Em Linux e macOS, Chat e Agente continuam funcionando; apenas a medição avançada de VRAM e o autoajuste baseado nas APIs do Windows ficam indisponíveis.
+> **Otimizado para Windows 10/11 x64.** No Windows, o Offgrid mede RAM, consulta VRAM quando o driver permite e adapta backend/GPU Layers. Em Linux e macOS, Chat, Planejar, Somente leitura e Agente continuam funcionando; apenas a medição avançada de VRAM e o autoajuste baseado no Windows ficam indisponíveis.
 
-Assistente de programação local para Visual Studio Code com modelos GGUF baixados pelo GitHub Releases. A inferência ocorre no computador e o conteúdo do workspace não é enviado ao GitHub nem a serviços externos durante o chat.
+Assistente local para Visual Studio Code com modelos GGUF. A inferência ocorre no computador; o conteúdo do workspace não é enviado a serviços externos durante o chat.
 
-## Modelos
+## Modelos incluídos no catálogo
 
-| Modelo | Indicação | Tamanho aproximado |
+| Modelo | Uso recomendado | Tamanho aproximado |
 |---|---|---:|
-| Qwen2.5-Coder-3B-Instruct Q4_K_M | Máquina com pouca memória; pesquisa/não comercial | 2,1 GB |
-| Qwen2.5-Coder-7B-Instruct Q4_K_M | Angular, TypeScript, HTML, Java e Spring | 4,7 GB |
+| Qwen2.5-Coder-3B-Instruct Q4_K_M | Máquinas mais limitadas e respostas rápidas | 2,1 GB |
+| Qwen2.5-Coder-7B-Instruct Q4_K_M | Tarefas mais complexas de Angular, Java e refatoração | 4,7 GB |
 
-O seletor no topo do chat mostra se cada modelo está **não instalado**, **instalado**, **ativo** ou **carregado na memória**. Apenas um modelo permanece carregado por vez.
+O seletor no topo do chat diferencia **não instalado**, **instalado**, **ativo** e **carregado**. O Offgrid mantém no máximo um modelo carregado em memória.
 
-## Recursos principais
+## Offgrid 1.5 — estabilização e diagnóstico
 
-- Motor local executado em **processo isolado** do Extension Host.
-- RAM do sistema e RAM precisa do processo do motor.
-- No Windows, consulta de VRAM por `nvidia-smi` ou pelas informações disponibilizadas pelo Windows.
-- Perfil automático por modelo e computador.
-- Tentativas progressivas de GPU Layers antes do fallback final para CPU.
-- Histórico das configurações de hardware que funcionaram ou falharam.
-- Reinício do motor sem reiniciar todo o VS Code.
-- Troca rápida de modelo dentro do chat.
-- Histórico local de sessões.
-- Arquivo ativo ou fixado como ponto de partida da análise.
-- Contexto adicional por arquivo, seleção ou pasta.
-- Modo Agente com pesquisa no workspace e leitura protegida de `node_modules`.
-- Revisão visual por diff antes de salvar.
+- Loop real de ferramentas do Agente: chamadas como `listWorkspaceFiles` e `readWorkspaceFile` são executadas, e o resultado volta ao modelo.
+- Arquivos citados pelo usuário têm prioridade sobre seleção ativa, arquivo fixado e busca geral.
+- Modos separados: **Chat**, **Planejar**, **Somente leitura** e **Agente**.
+- Descarregamento verificável de sessão, contexto, modelo e runtime, com confirmação visual e logs de cada etapa.
+- Estados consistentes do motor: não iniciado, carregando, pronto, descarregando, descarregado e erro.
+- Interface responsiva e diagnóstico configurável como `hidden`, `compact`, `expanded` ou `onError`.
+- Histórico local de sessões com busca, renomear, fixar, duplicar e excluir.
+- Seletor de modelo no chat, rollback para o último modelo funcional e fallback progressivo Vulkan → menos GPU Layers → CPU.
+- Logs UTF-8 no Output Channel e em arquivos rotativos.
+- Botão **Copiar diagnóstico** com ambiente, modelo, backend, memória, último erro e últimas linhas do log.
+- Revisão visual por diff antes de salvar alterações do Agente.
 
-## Compatibilidade de sistema operacional
+## Windows, Linux e macOS
 
 ### Windows
 
-Todos os recursos estão disponíveis:
+Todos os recursos ficam disponíveis quando o hardware e o driver expõem os dados:
 
-- RAM total, livre e em uso.
-- RAM exclusiva do processo do motor.
-- Nome da GPU e VRAM, quando expostos pelo driver.
-- Perfil automático de backend e GPU Layers.
-- Aviso antes de tentar modelos que não cabem nos recursos disponíveis.
-- Fallback progressivo para menos camadas e, por fim, CPU.
+- RAM total, disponível e consumo do processo isolado;
+- GPU e VRAM por `nvidia-smi` ou informações do Windows;
+- perfis adaptativos por máquina e modelo;
+- redução progressiva de GPU Layers;
+- fallback automático para CPU.
 
 ### Linux e macOS
 
-A extensão **não falha nem deixa de iniciar**. Permanecem disponíveis:
+A extensão não deve falhar por estar fora do Windows. Continuam disponíveis:
 
-- Chat e Agente.
-- Modelos GGUF.
-- RAM total e disponível.
-- RAM do processo isolado do motor.
-- Backend manual ou detecção padrão do `node-llama-cpp`.
+- modelos GGUF, Chat e os três modos de análise/agente;
+- RAM genérica e RAM do processo do motor;
+- backend manual ou detecção padrão do `node-llama-cpp`;
+- sessões, contexto, ferramentas e revisão por diff.
 
-Ficam indisponíveis apenas:
-
-- Medição avançada de VRAM baseada no Windows.
-- Perfil adaptativo orientado pelo orçamento de GPU do Windows.
-
-O painel exibirá `VRAM detalhada: somente Windows` e seguirá com a configuração padrão/fallback.
+Ficam indisponíveis somente a VRAM avançada do Windows e o perfil adaptativo orientado por essa medição.
 
 ## Instalação
 
-1. Abra **Releases**.
-2. Baixe o `.vsix` da versão mais recente.
-3. No VS Code, use **Extensões → ... → Install from VSIX...**.
-4. Reinicie o VS Code.
-5. Escolha o modelo no seletor exibido no topo do chat.
+1. Em **Releases**, baixe o `.vsix` mais recente.
+2. No VS Code, abra **Extensões → ... → Install from VSIX...**.
+3. Reinicie o VS Code.
+4. Abra o painel Offgrid e escolha um modelo no seletor superior.
 
-## Configuração recomendada no Windows
+## Configuração recomendada para diagnóstico inicial no Windows
 
 ```json
 {
@@ -78,68 +68,53 @@ O painel exibirá `VRAM detalhada: somente Windows` e seguirá com a configuraç
   "offgrid.resourceMonitoring": true,
   "offgrid.resourceRefreshSeconds": 15,
   "offgrid.contextSize": 4096,
-  "offgrid.includeWorkspaceContext": true,
-  "offgrid.autoLoadModel": true,
+  "offgrid.maxAgentSteps": 10,
+  "offgrid.diagnosticsPanel": "compact",
+  "offgrid.logLevel": "debug",
+  "offgrid.diagnosticMode": false,
   "offgrid.agentApprovalMode": "ask"
 }
 ```
 
-Para forçar CPU:
+`offgrid.diagnosticMode` registra stack traces, prévias de prompts, caminhos e resultados de ferramentas. Ative apenas durante depuração, pois os logs podem conter partes do código e nomes de arquivos.
 
-```json
-{
-  "offgrid.gpu": "cpu",
-  "offgrid.gpuLayers": 0
-}
-```
+## Agente e contexto
 
-## Como funciona o perfil automático
+Prioridade usada pelo Agente:
 
-1. O Offgrid mede os recursos antes do carregamento.
-2. Consulta um perfil anteriormente validado para esse modelo e computador.
-3. Quando necessário, tenta uma quantidade parcial de GPU Layers.
-4. Se faltar VRAM, reduz as camadas progressivamente.
-5. Se ainda falhar, tenta CPU.
-6. A configuração que funcionar é salva para o próximo carregamento.
+1. arquivos citados diretamente no pedido;
+2. seleção ativa;
+3. arquivo fixado ou aba atual;
+4. arquivos relacionados;
+5. busca geral no workspace.
 
-O perfil pode ser removido com:
+No modo **Agente**, as mudanças ficam preparadas para revisão. Clique no arquivo para abrir o diff nativo do VS Code e escolha **Aceitar alterações** ou **Rejeitar**. `.git`, `node_modules` e caminhos fora do workspace permanecem protegidos contra escrita.
 
-```text
-Offgrid: Limpar Perfil Automático de Hardware
-```
+## Logs e diagnóstico
 
-## Processo isolado do motor
+Abra **Exibir → Saída → Offgrid**. Os arquivos de log ficam na pasta de armazenamento global da extensão, dentro de `logs`, separados por categoria:
 
-O `node-llama-cpp` roda em um processo separado. Isso permite:
+- `offgrid-AAAA-MM-DD.log`;
+- `agent-AAAA-MM-DD.log`;
+- `model-AAAA-MM-DD.log`;
+- `diagnostics-AAAA-MM-DD.log`.
 
-- medir a RAM usada pelo Offgrid com mais precisão;
-- descarregar o modelo encerrando o processo;
-- recuperar falhas nativas sem derrubar o Extension Host;
-- reiniciar o motor com `Offgrid: Reiniciar Processo do Motor`.
+Cada categoria mantém até 10 arquivos, com rotação a partir de 10 MB.
 
-Essa versão prepara a arquitetura para um serviço compartilhado entre IDEs, mas o compartilhamento simultâneo com o plugin IntelliJ ainda exige uma atualização própria do **OffGrid IntJ**.
+Comandos úteis:
 
-## Modo Agente e revisão
-
-O modo padrão de aprovação é **Perguntar sempre**:
-
-1. O agente pesquisa e prepara a proposta.
-2. O chat lista os arquivos afetados.
-3. Clique em **Ver diff** para abrir a comparação nativa do VS Code.
-4. Linhas removidas aparecem em vermelho e linhas novas em verde.
-5. Escolha **Aceitar alterações** ou **Rejeitar**.
-
-As pastas `.git`, `node_modules` e outras pastas protegidas permanecem bloqueadas para escrita.
-
-## Diagnóstico
-
-Abra **Exibir → Saída → Offgrid** ou execute:
-
+- `Offgrid: Copiar Diagnóstico Completo`
+- `Offgrid: Abrir Pasta de Logs`
 - `Offgrid: Mostrar RAM e VRAM`
 - `Offgrid: Mostrar Diagnóstico do Modelo`
 - `Offgrid: Mostrar Diagnóstico do Agente`
 - `Offgrid: Reiniciar Processo do Motor`
 - `Offgrid: Liberar Modelo da Memória`
+- `Offgrid: Limpar Perfil Automático de Hardware`
+
+## Processo isolado
+
+O `node-llama-cpp` roda em um processo separado do Extension Host. O comando de descarregamento libera sessão, contexto, modelo e runtime dentro desse processo. O comando de reinício encerra e recria o processo inteiro quando for necessário recuperar uma falha nativa.
 
 ## Licenças
 

@@ -9,14 +9,17 @@ class SessionStore {
     this.storageDir = storageDir;
     this.filePath = path.join(storageDir, 'chat-sessions.json');
     this.logger = logger;
-    this.data = { version: 1, activeSessionId: '', sessions: [] };
+    this.data = { version: 3, activeSessionId: '', sessions: [] };
   }
 
   async init() {
     await fsp.mkdir(this.storageDir, { recursive: true });
     try {
       const parsed = JSON.parse(await fsp.readFile(this.filePath, 'utf8'));
-      if (parsed?.version === 1 && Array.isArray(parsed.sessions)) this.data = parsed;
+      if (Array.isArray(parsed?.sessions)) {
+        this.data = { ...parsed, version: 3 };
+        this.data.sessions = parsed.sessions.map(session => ({ ...session, metadata: session.metadata || {} }));
+      }
     } catch (error) {
       if (error?.code !== 'ENOENT') this.logger(`Falha ao ler histórico: ${error.message || error}`);
     }
@@ -46,7 +49,9 @@ class SessionStore {
         pinned: Boolean(session.pinned),
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
-        messageCount: session.messages.length
+        messageCount: session.messages.length,
+        metadata: { ...(session.metadata || {}) },
+        searchText: [session.title, ...(session.messages || []).slice(-20).map(message => message.text || '')].join(' ').slice(0, 12000)
       }))
     };
   }
@@ -95,6 +100,15 @@ class SessionStore {
     if (role === 'user' && session.title === 'Nova conversa') {
       session.title = clean.replace(/\s+/g, ' ').slice(0, 48) || 'Nova conversa';
     }
+    session.metadata = { ...(session.metadata || {}), mode };
+    session.updatedAt = new Date().toISOString();
+    await this.#save();
+  }
+
+  async updateMetadata(patch = {}) {
+    const session = this.getActiveSession();
+    if (!session) return;
+    session.metadata = { ...(session.metadata || {}), ...patch };
     session.updatedAt = new Date().toISOString();
     await this.#save();
   }
@@ -125,6 +139,7 @@ class SessionStore {
     const source = this.#require(id);
     const copy = this.#createSession(`${source.title} — cópia`);
     copy.messages = source.messages.map(message => ({ ...message, id: crypto.randomUUID() }));
+    copy.metadata = { ...(source.metadata || {}) };
     copy.pinned = false;
     this.data.sessions.push(copy);
     this.data.activeSessionId = copy.id;
@@ -155,6 +170,7 @@ class SessionStore {
       pinned: false,
       createdAt: now,
       updatedAt: now,
+      metadata: {},
       messages: []
     };
   }

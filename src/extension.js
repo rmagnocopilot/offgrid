@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const vscode = require('vscode');
 const { EngineProcessClient } = require('./engine-client');
 const { isDeviceMemoryError } = require('./llama-engine');
@@ -13,16 +14,42 @@ const { WorkspaceAgent } = require('./workspace-agent');
 const { ChangePreviewProvider } = require('./change-preview');
 const { SessionStore } = require('./session-store');
 const { loadCatalog, repositoryReleaseBase, repositoryCoordinates } = require('./model-catalog');
+const { FileLogger } = require('./file-logger');
+const { extractExplicitFileReferences, basenameReference } = require('./agent-context');
 
 /** @param {vscode.ExtensionContext} context */
 async function activate(context) {
   const output = vscode.window.createOutputChannel('Offgrid');
-  const log = message => output.appendLine(`[${new Date().toISOString()}] ${message}`);
-  const logAgent = message => log(`[Agent] ${message}`);
+  const initialConfiguration = vscode.workspace.getConfiguration('offgrid');
+  const fileLogger = new FileLogger({
+    storagePath: context.globalStorageUri.fsPath,
+    outputChannel: output,
+    level: initialConfiguration.get('logLevel', 'debug'),
+    diagnosticMode: initialConfiguration.get('diagnosticMode', false)
+  });
+  const writeRoutedLog = (category, message, fallbackLevel = 'debug') => {
+    const text = String(message);
+    const level = /\[(?:ERRO|ERROR)\]/i.test(text) ? 'error'
+      : /\[WARN\]/i.test(text) ? 'warn'
+        : /\[TRACE\]/i.test(text) ? 'trace'
+          : fallbackLevel;
+    fileLogger.log(category, level, text);
+  };
+  const log = message => writeRoutedLog('offgrid', message, 'info');
+  const logAgent = message => {
+    const text = String(message);
+    writeRoutedLog('agent', text.startsWith('[Agent]') ? text : `[Agent] ${text}`, 'debug');
+  };
+  const logModel = message => {
+    const text = String(message);
+    if (text.includes('[Agent]')) writeRoutedLog('agent', text, 'debug');
+    else if (text.includes('[Memory]') || text.includes('[Diagnostics]')) writeRoutedLog('diagnostics', text, 'debug');
+    else writeRoutedLog('model', text, 'debug');
+  };
   const engine = new EngineProcessClient({
     extensionPath: context.extensionPath,
     storagePath: context.globalStorageUri.fsPath,
-    logger: log
+    logger: logModel
   });
   const chat = new ChatViewProvider(context.extensionUri);
   const preview = new ChangePreviewProvider();
@@ -35,13 +62,22 @@ async function activate(context) {
     agentState = activity;
     logAgent(activity);
     refreshDashboard();
-  });
+  }, message => logAgent(message));
   const sessions = new SessionStore(context.globalStorageUri.fsPath, log);
   await sessions.init();
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = 'offgrid.manageModels';
   statusBar.text = '$(plug) Offgrid';
   statusBar.show();
+
+  if (initialConfiguration.get('diagnosticMode', false)) {
+    fileLogger.warn('offgrid', '[Diagnostics] Modo diagnóstico ativo. Logs podem conter caminhos, prévias de prompts e resultados de ferramentas.');
+    const noticeKey = `offgrid.diagnosticNotice.${context.extension.packageJSON.version || 'current'}`;
+    if (!context.globalState.get(noticeKey, false)) {
+      vscode.window.showWarningMessage('Offgrid: o modo diagnóstico está ativo e pode registrar caminhos e trechos de código nos logs locais.');
+      await context.globalState.update(noticeKey, true);
+    }
+  }
 
   let abortController = null;
   let currentInstaller = null;
@@ -61,7 +97,9 @@ async function activate(context) {
     contextSize: config().get('contextSize', 4096),
     maxTokens: config().get('maxTokens', 1024),
     temperature: config().get('temperature', 0.2),
-    agentMaxTokens: config().get('agentMaxTokens', 4096)
+    agentMaxTokens: config().get('agentMaxTokens', 4096),
+    maxAgentSteps: config().get('maxAgentSteps', 10),
+    diagnosticMode: config().get('diagnosticMode', false)
   });
   let resourceTimer = null;
   let resourceRefreshRunning = false;
@@ -116,12 +154,17 @@ async function activate(context) {
       backend: engine.isLoaded ? String(engine.backend || 'cpu').toUpperCase() : '—',
       contextSize: current.contextSize,
       gpuLayers: current.gpuLayers,
-      chatState,
-      agentState,
+      chatState: engine.isLoaded ? chatState : (engine.isLoading ? 'Carregando' : 'Indisponível'),
+      agentState: engine.isLoaded ? agentState : (engine.isLoading ? 'Aguardando modelo' : 'Indisponível'),
+      engineState: engine.diagnostics.engineState || (engine.isLoaded ? 'ready' : 'notStarted'),
+      engineStateLabel: engineStateLabel(engine.diagnostics.engineState || (engine.isLoaded ? 'ready' : 'notStarted')),
       loading: engine.isLoading,
       resources: summarizeResources(engine.diagnostics.resourceSnapshot),
       workerPid: engine.diagnostics.workerPid || null,
-      selectedProfile: engine.diagnostics.selectedProfile || null
+      selectedProfile: engine.diagnostics.selectedProfile || null,
+      effectiveGpuLayers: engine.diagnostics.gpuLayers ?? current.gpuLayers,
+      diagnosticsPanel: config().get('diagnosticsPanel', 'compact'),
+      lastError: engine.diagnostics.lastError || ''
     });
     chat.setSessions(sessions.snapshot());
   }
@@ -172,6 +215,14 @@ async function activate(context) {
       chatState = 'Pronto';
       agentState = 'Pronto';
       statusBar.text = `$(plug) ${name} [${backend}]`;
+      await context.globalState.update('offgrid.lastFunctionalModelPath', current.modelPath);
+      await sessions.updateMetadata({
+        model: name,
+        backend,
+        contextSize: current.contextSize,
+        lastError: '',
+        contextFiles: [relative(pinnedUri), ...contextEntries.map(entry => entry.label)].filter(Boolean)
+      });
       if (diag.lastFallback) {
         const from = typeof diag.lastFallback.from === 'object'
           ? `${diag.lastFallback.from.gpu}/${diag.lastFallback.from.gpuLayers}`
@@ -192,7 +243,8 @@ async function activate(context) {
     } catch (error) {
       chatState = 'Erro ao carregar';
       statusBar.text = '$(error) Offgrid';
-      log(`ERRO ao carregar: ${error instanceof Error ? error.stack || error.message : String(error)}`);
+      logModel(`[Load][ERRO] ${error instanceof Error ? error.stack || error.message : String(error)}`);
+      await sessions.updateMetadata({ lastError: error instanceof Error ? error.message : String(error) });
       refreshDashboard();
       if (showErrors) await friendlyLoadError(error, current);
       return false;
@@ -200,13 +252,33 @@ async function activate(context) {
   }
 
   async function friendlyLoadError(error, current) {
+    const message = error instanceof Error ? error.message : String(error);
     if (isDeviceMemoryError(error)) {
+      await refreshResources(true).catch(() => undefined);
+      const snapshot = engine.diagnostics.resourceSnapshot;
+      const summary = summarizeResources(snapshot);
+      const gpu = [...(snapshot?.gpus || [])]
+        .sort((a, b) => Number(b.availableBytes || 0) - Number(a.availableBytes || 0))[0];
+      const modelName = path.basename(current.modelPath, '.gguf');
+      const details = [
+        `Não foi possível carregar ${modelName} usando ${String(current.gpu || 'auto').toUpperCase()}.`,
+        '',
+        'Causa provável: memória de GPU insuficiente.',
+        gpu ? `GPU detectada: ${gpu.name} — ${bytesToGb(gpu.totalBytes) ?? '?'} GB totais; ${bytesToGb(gpu.availableBytes) ?? '?'} GB disponíveis.` : `GPU: ${summary.gpu}`,
+        `RAM: ${summary.ram}`,
+        '',
+        'O Offgrid já tentou os perfis adaptativos disponíveis. Você pode forçar CPU, voltar ao Qwen 3B ou abrir os logs.'
+      ].join('\n');
+      fileLogger.error('model', `[Load][VRAM] ${details}
+Erro original: ${error?.stack || message}`);
       const action = await vscode.window.showErrorMessage(
-        `Memória de GPU insuficiente para ${path.basename(current.modelPath, '.gguf')}.`,
-        'Tentar em CPU', 'Usar Qwen 3B', 'Abrir logs'
+        details,
+        { modal: true },
+        'Carregar em CPU', 'Usar Qwen 3B', 'Abrir logs'
       );
-      if (action === 'Tentar em CPU') {
+      if (action === 'Carregar em CPU') {
         await config().update('gpu', 'cpu', vscode.ConfigurationTarget.Global);
+        await config().update('gpuLayers', 0, vscode.ConfigurationTarget.Global);
         await loadConfiguredModel(true);
       } else if (action === 'Usar Qwen 3B') {
         const small = catalog.models.find(model => model.id.includes('3b'));
@@ -214,8 +286,9 @@ async function activate(context) {
       } else if (action === 'Abrir logs') output.show(true);
       return;
     }
-    const action = await vscode.window.showErrorMessage(`Offgrid: ${error instanceof Error ? error.message : String(error)}`, 'Abrir logs');
+    const action = await vscode.window.showErrorMessage(`Offgrid: ${message}`, 'Abrir logs', 'Copiar diagnóstico');
     if (action === 'Abrir logs') output.show(true);
+    else if (action === 'Copiar diagnóstico') await copyDiagnostics();
   }
 
   function releaseBaseUrl() {
@@ -286,17 +359,89 @@ async function activate(context) {
     const model = catalog.models.find(item => item.id === modelId);
     if (!model) throw new Error('Modelo não encontrado.');
     if (!fs.existsSync(modelFile(model))) return installModel(model, false);
-    await setModelPath(modelFile(model));
-    await loadConfiguredModel(true);
+
+    const previousConfigured = options().modelPath;
+    const previousLoaded = engine.loadedModelPath || context.globalState.get('offgrid.lastFunctionalModelPath', '');
+    logModel('[ModelSwitch] Solicitação recebida.');
+    logModel(`[ModelSwitch] Modelo atual: ${previousConfigured || 'nenhum'}.`);
+    logModel(`[ModelSwitch] Modelo solicitado: ${modelFile(model)}.`);
+    logModel(`[ModelSwitch] Backend solicitado: ${options().gpu}; GPU Layers=${options().gpuLayers}.`);
+    if (previousLoaded && path.resolve(previousLoaded) === path.resolve(modelFile(model)) && engine.isLoaded) {
+      logModel('[ModelSwitch] O modelo solicitado já está carregado.');
+      return true;
+    }
+
+    try {
+      if (engine.isLoaded) {
+        logModel('[ModelSwitch] Descarregando modelo anterior.');
+        await engine.unload();
+        logModel('[ModelSwitch] Unload finalizado.');
+      }
+      await setModelPath(modelFile(model));
+      logModel(`[ModelSwitch] Carregando novo modelo: ${model.displayName}.`);
+      const loaded = await loadConfiguredModel(true);
+      if (!loaded) throw new Error(`Falha ao carregar ${model.displayName}.`);
+      logModel(`[ModelSwitch] Load concluído. Modelo=${model.displayName}; backend efetivo=${engine.backend}; GPU Layers=${engine.diagnostics.gpuLayers}.`);
+      return true;
+    } catch (error) {
+      logModel(`[ModelSwitch][ERRO] Falha ao carregar modelo. ${error?.stack || error}`);
+      const rollback = previousLoaded && fs.existsSync(previousLoaded) ? previousLoaded : previousConfigured;
+      if (rollback && fs.existsSync(rollback) && path.resolve(rollback) !== path.resolve(modelFile(model))) {
+        logModel(`[ModelSwitch] Revertendo para o último modelo funcional: ${rollback}.`);
+        await setModelPath(rollback);
+        const restored = await loadConfiguredModel(false);
+        if (restored) vscode.window.showWarningMessage(`Não foi possível usar ${model.displayName}. O Offgrid restaurou ${path.basename(rollback, '.gguf')}.`);
+      } else {
+        await setModelPath(previousConfigured || '');
+      }
+      refreshDashboard();
+      return false;
+    }
   }
 
   async function unloadModel() {
     abortController?.abort();
-    await engine.unload();
-    chatState = 'Modelo descarregado';
+    chatState = 'Descarregando';
     agentState = 'Aguardando modelo';
-    statusBar.text = '$(debug-disconnect) Offgrid';
     refreshDashboard();
+    try {
+      const report = await engine.unload();
+      chatState = 'Indisponível';
+      agentState = 'Indisponível';
+      statusBar.text = '$(debug-disconnect) Offgrid';
+      refreshDashboard();
+      const duration = Number(report?.durationMs || report?.diagnostics?.lastUnloadReport?.durationMs || 0);
+      vscode.window.showInformationMessage(`Modelo descarregado da memória com sucesso${duration ? ` em ${duration} ms` : ''}.`);
+      return report;
+    } catch (error) {
+      chatState = 'Erro';
+      agentState = 'Erro';
+      refreshDashboard();
+      const action = await vscode.window.showErrorMessage('Falha ao descarregar modelo da memória. Consulte Exibir → Saída → Offgrid.', 'Abrir logs');
+      if (action === 'Abrir logs') output.show(true);
+      throw error;
+    }
+  }
+
+  async function validateModel(model) {
+    const target = modelFile(model);
+    if (!fs.existsSync(target)) throw new Error('O modelo não está instalado.');
+    const stat = await fsp.stat(target);
+    const expectedSize = Number(model.sizeBytes || 0);
+    const hash = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(target);
+      stream.on('data', chunk => hash.update(chunk));
+      stream.on('error', reject);
+      stream.on('end', resolve);
+    });
+    const actualHash = hash.digest('hex').toLowerCase();
+    const expectedHash = String(model.sha256 || '').toLowerCase();
+    const valid = (!expectedSize || stat.size === expectedSize) && (!expectedHash || actualHash === expectedHash);
+    logModel(`[ModelValidation] ${model.displayName}; bytes=${stat.size}; sha256=${actualHash}; válido=${valid}.`);
+    if (!valid) throw new Error(`O arquivo ${model.fileName} não corresponde ao tamanho ou SHA-256 esperado.`);
+    vscode.window.showInformationMessage(`${model.displayName} foi validado com sucesso.`);
+    return { valid, size: stat.size, sha256: actualHash };
   }
 
   async function removeModel(model) {
@@ -333,6 +478,7 @@ async function activate(context) {
     else {
       if (!state.loaded) actions.push({ label: '$(play) Carregar / ativar', id: 'load' });
       if (state.loaded) actions.push({ label: '$(debug-disconnect) Descarregar da memória', id: 'unload' });
+      actions.push({ label: '$(verified-filled) Validar arquivo', id: 'validate' });
       actions.push({ label: '$(refresh) Reinstalar', id: 'reinstall' });
       actions.push({ label: '$(trash) Remover', id: 'remove' });
     }
@@ -342,6 +488,7 @@ async function activate(context) {
     if (action.id === 'install') await installModel(model);
     else if (action.id === 'load') await switchModel(model.id);
     else if (action.id === 'unload') await unloadModel();
+    else if (action.id === 'validate') await validateModel(model);
     else if (action.id === 'reinstall') await installModel(model, true);
     else if (action.id === 'remove') await removeModel(model);
     else if (action.id === 'details') {
@@ -483,21 +630,72 @@ async function activate(context) {
     }
   }
 
-  async function agentPrompt(text) {
+  async function resolveExplicitFiles(text) {
+    const references = extractExplicitFileReferences(text);
+    if (!references.length) return { references: [], matches: [] };
+    logAgent(`Arquivos citados no prompt: ${references.join(', ')}`);
+    const allMatches = [];
+    for (const reference of references) {
+      const basename = basenameReference(reference);
+      const direct = resolveWorkspacePath(reference);
+      if (direct) {
+        const located = relative(direct);
+        logAgent(`Caminho citado localizado diretamente: ${located}`);
+        allMatches.push(located);
+        continue;
+      }
+      const safeName = basename.replace(/[\[\]{}*?]/g, '');
+      if (!safeName) continue;
+      const pattern = `**/${safeName}`;
+      logAgent(`Buscando arquivo citado: ${pattern}`);
+      const found = await vscode.workspace.findFiles(pattern, '**/{node_modules,.git,out,dist,build,coverage,.next,.venv,venv,target}/**', 20);
+      for (const uri of found) allMatches.push(relative(uri));
+    }
+    const matches = [...new Set(allMatches)];
+    logAgent(`Arquivos citados localizados: ${matches.join(', ') || 'nenhum'}`);
+    if (matches.length) logAgent('Priorizando os arquivos citados pelo usuário sobre o arquivo fixado.');
+    return { references, matches };
+  }
+
+  async function agentPrompt(text, requestedMode = 'agent') {
+    const explicit = await resolveExplicitFiles(text);
     const hints = [];
-    const mainUri = pinnedUri || vscode.window.activeTextEditor?.document.uri;
-    if (mainUri && usableContext(mainUri)) hints.push(`Arquivo fixado: ${relative(mainUri)}`);
+    if (explicit.references.length) {
+      hints.push(`Arquivos explicitamente citados pelo usuário: ${explicit.references.join(', ')}`);
+      if (explicit.matches.length) hints.push(`Caminhos localizados para os arquivos citados: ${explicit.matches.join(', ')}`);
+    }
+
+    const editor = vscode.window.activeTextEditor;
+    if (editor && usableContext(editor.document.uri) && !editor.selection.isEmpty) {
+      hints.push(`Seleção ativa: ${relative(editor.document.uri)}:${editor.selection.start.line + 1}-${editor.selection.end.line + 1}`);
+    }
+    const mainUri = pinnedUri || editor?.document.uri;
+    if (mainUri && usableContext(mainUri)) {
+      hints.push(`Arquivo fixado/ativo: ${relative(mainUri)}`);
+      logAgent(`Arquivo fixado atual: ${relative(mainUri)}`);
+    }
     for (const entry of contextEntries) hints.push(`Contexto adicional (${entry.type}): ${entry.label}`);
+
+    const modeInstructions = requestedMode === 'plan'
+      ? 'MODO PLANEJAR: pesquise e leia os arquivos necessários, mas não prepare nem aplique alterações. Entregue um plano detalhado.'
+      : requestedMode === 'readOnly'
+        ? 'MODO SOMENTE LEITURA: pesquise e leia os arquivos necessários, sem preparar alterações. Responda com a análise solicitada.'
+        : 'MODO AGENTE: prepare mudanças com stageReplace/stageFile e finalize com applyChanges para abrir a revisão.';
+
     return [
       `Tarefa: ${text}`,
+      `Modo solicitado: ${requestedMode}`,
       `Workspace(s): ${(vscode.workspace.workspaceFolders || []).map(folder => folder.name).join(', ')}`,
       ...hints,
-      'Comece pelo arquivo fixado, pesquise arquivos relacionados e consulte node_modules apenas como leitura.',
-      'Quando a escrita estiver disponível, prepare as mudanças e finalize com applyChanges.'
+      modeInstructions,
+      explicit.references.length
+        ? 'Prioridade obrigatória: comece pelos arquivos citados explicitamente pelo usuário. O arquivo fixado é secundário nesta tarefa.'
+        : 'Comece pela seleção ativa; depois use o arquivo fixado/ativo e pesquise arquivos relacionados.',
+      'Consulte node_modules apenas como leitura. Não imprima somente JSON de ferramenta: use as ferramentas e prossiga até concluir.'
     ].filter(Boolean).join('\n\n');
   }
 
-  async function runAgent(text) {
+  async function runAgent(text, requestedMode = 'agent') {
     if (agent.hasPendingReview) {
       chat.addMessage('system', 'Existe uma revisão pendente. Aceite ou rejeite antes de iniciar outra tarefa.');
       return chat.finishAssistant();
@@ -510,10 +708,14 @@ async function activate(context) {
       chat.addMessage('system', 'O Agente exige um workspace confiável.');
       return chat.finishAssistant();
     }
-    const approval = config().get('agentApprovalMode', config().get('agentRequireReview', true) ? 'ask' : 'full');
+
+    const requestedReadOnly = requestedMode === 'plan' || requestedMode === 'readOnly';
+    const approval = requestedReadOnly
+      ? 'readOnly'
+      : config().get('agentApprovalMode', config().get('agentRequireReview', true) ? 'ask' : 'full');
     if (config().get('agentRequireConfirmation', true) && approval !== 'readOnly') {
       const answer = await vscode.window.showWarningMessage(
-        'O Offgrid poderá ler e alterar arquivos permitidos do workspace. Pastas protegidas permanecem somente leitura.',
+        'O Offgrid poderá ler e preparar alterações em arquivos permitidos do workspace. Pastas protegidas permanecem somente leitura.',
         { modal: true }, approval === 'full' ? 'Executar e aplicar automaticamente' : 'Executar agente'
       );
       if (!answer) {
@@ -528,29 +730,46 @@ async function activate(context) {
     agentState = 'Iniciando';
     refreshDashboard();
     let streamed = false;
+    const startedAt = Date.now();
     try {
       logAgent('runAgent iniciado.');
-      logAgent(`Texto: ${text}`);
-      logAgent(`Engine carregado=${engine.isLoaded}; backend=${engine.backend || 'cpu'}; aprovação=${approval}`);
+      logAgent(`Texto recebido: ${text}`);
+      logAgent(`Workspace(s): ${(vscode.workspace.workspaceFolders || []).map(folder => folder.name).join(', ')}`);
+      logAgent(`Modelo ativo: ${engine.loadedModelPath || 'nenhum'}`);
+      logAgent(`Backend atual: ${engine.backend || 'cpu'}`);
+      logAgent(`Modo=${requestedMode}; aprovação=${approval}; maxSteps=${options().maxAgentSteps}`);
       const functions = await agent.createFunctions({ readOnly: approval === 'readOnly' });
-      logAgent(`Funções criadas: ${Object.keys(functions).length}`);
-      const prompt = await agentPrompt(text);
+      logAgent(`Funções disponíveis: ${Object.keys(functions).join(', ')}`);
+      const prompt = await agentPrompt(text, requestedMode);
       logAgent(`Prompt montado. Caracteres=${prompt.length}`);
-      agentState = 'Executando ferramentas';
+      if (options().diagnosticMode) fileLogger.trace('agent', `Prompt preview:\n${prompt.slice(0, 12000)}`);
+      agentState = requestedMode === 'plan' ? 'Planejando' : 'Executando ferramentas';
       refreshDashboard();
       const result = await engine.runAgent(prompt, {
         functions,
         agentSystemPrompt,
         maxTokens: options().agentMaxTokens,
+        maxAgentSteps: options().maxAgentSteps,
+        diagnosticMode: options().diagnosticMode,
         signal: abortController.signal,
         onChunk: chunk => { streamed = true; chat.appendAssistant(chunk); }
       });
       if (!streamed && result) chat.appendAssistant(result);
-      if (result) await sessions.addMessage('assistant', result, 'agent');
+      if (result) await sessions.addMessage('assistant', result, requestedMode);
+      await sessions.updateMetadata({
+        mode: requestedMode,
+        model: path.basename(engine.loadedModelPath || '', '.gguf'),
+        backend: String(engine.backend || 'cpu').toUpperCase(),
+        contextSize: options().contextSize,
+        contextFiles: [relative(pinnedUri), ...contextEntries.map(entry => entry.label)].filter(Boolean),
+        lastError: ''
+      });
 
       if (approval === 'readOnly') {
         agent.reset();
-        chat.addMessage('system', 'Modo Somente leitura: nenhum arquivo foi alterado.');
+        chat.addMessage('system', requestedMode === 'plan'
+          ? 'Modo Planejar: nenhum arquivo foi alterado.'
+          : 'Modo Somente leitura: nenhum arquivo foi alterado.');
       } else {
         if (agent.hasStagedChanges && !agent.hasPendingReview) agent.preparePendingReview('Alterações propostas pelo agente');
         const review = agent.getPendingReview();
@@ -563,15 +782,16 @@ async function activate(context) {
         }
       }
       agentState = 'Pronto';
-      logAgent('runAgent concluído.');
+      logAgent(`runAgent concluído em ${Date.now() - startedAt} ms.`);
     } catch (error) {
       if (error?.name !== 'AbortError') {
         const details = error instanceof Error ? error.stack || error.message : String(error);
-        logAgent(`ERRO: ${details}`);
+        fileLogger.error('agent', `ERRO no modo agente: ${details}`);
         agentState = 'Erro';
         const message = error instanceof Error ? error.message : String(error);
+        await sessions.updateMetadata({ mode: requestedMode, lastError: message });
         chat.appendAssistant(/no sequences left/i.test(message)
-          ? '\n\n[O motor não conseguiu obter uma sequência. Execute “Offgrid: Reiniciar Agente” e consulte Exibir → Saída → Offgrid.]'
+          ? '\n\n[Não foi possível iniciar o Agente porque o motor não obteve uma sequência. Use “Offgrid: Reiniciar Agente” e consulte os logs.]'
           : `\n\n[Erro do agente: ${message}. Consulte Exibir → Saída → Offgrid.]`);
       }
     } finally {
@@ -619,29 +839,66 @@ async function activate(context) {
     refreshDashboard();
   }
 
-  async function showModelDiagnostics() {
+  async function buildDiagnosticText({ includeLogs = true } = {}) {
+    await refreshResources(true).catch(() => undefined);
     const current = options();
     const diag = engine.diagnostics;
-    const text = [
-      `Versão: ${context.extension.packageJSON.version}`,
-      `Modelo configurado: ${current.modelPath || 'nenhum'}`,
+    const snapshot = diag.resourceSnapshot;
+    const summary = summarizeResources(snapshot);
+    const review = agent.getPendingReview();
+    const lines = [
+      `Offgrid version: ${context.extension.packageJSON.version}`,
+      `VS Code version: ${vscode.version}`,
+      `Node: ${process.versions.node || '—'}`,
+      `Electron: ${process.versions.electron || '—'}`,
+      `OS: ${process.platform} ${process.arch} ${require('node:os').release()}`,
+      `Modelos instalados: ${catalog.models.filter(model => fs.existsSync(modelFile(model))).map(model => model.displayName).join(', ') || 'nenhum'}`,
+      `Modelo ativo: ${current.modelPath || 'nenhum'}`,
       `Modelo carregado: ${diag.modelPath || 'nenhum'}`,
-      `Backend: ${diag.backend}`,
-      `Contexto: ${current.contextSize}`,
+      `Backend: ${diag.backend || 'cpu'}`,
+      `Estado do motor: ${diag.engineState || 'não iniciado'}`,
+      `PID do motor: ${diag.workerPid || 'não iniciado'}`,
+      `Context size: ${current.contextSize}`,
+      `Max tokens: ${current.maxTokens}`,
+      `Agent max tokens: ${current.agentMaxTokens}`,
+      `Max agent steps: ${current.maxAgentSteps}`,
       `GPU Layers: ${current.gpuLayers}`,
       `Fallback CPU: ${current.fallbackToCpu ? 'ativado' : 'desativado'}`,
-      `Sequências adquiridas: ${diag.sequenceAcquisitions}`,
-      `Processo do motor: ${diag.workerPid || 'não iniciado'}`,
-      `RAM do motor: ${bytesToGb(diag.processMemory?.rssBytes) ?? '—'} GB`,
-      `RAM do sistema: ${summarizeResources(diag.resourceSnapshot).ram}`,
-      `GPU/VRAM: ${summarizeResources(diag.resourceSnapshot).gpu}`,
+      `Nível de log: ${config().get('logLevel', 'debug')}`,
+      `Modo diagnóstico: ${config().get('diagnosticMode', false) ? 'ativado' : 'desativado'}`,
+      `Painel de diagnóstico: ${config().get('diagnosticsPanel', 'compact')}`,
+      `RAM total/livre: ${summary.ram}`,
+      `RAM do motor: ${summary.engine}`,
+      `GPU/VRAM: ${summary.gpu}`,
+      `Chat: ${chatState}`,
+      `Agente: ${agentState}`,
+      `Revisão pendente: ${review ? review.files.join(', ') : 'não'}`,
+      `Arquivo fixado: ${relative(pinnedUri) || 'nenhum'}`,
+      `Contextos adicionais: ${contextEntries.map(entry => entry.label).join(', ') || 'nenhum'}`,
       `Perfil selecionado: ${diag.selectedProfile ? JSON.stringify(diag.selectedProfile) : 'nenhum'}`,
       `Último fallback: ${diag.lastFallback ? JSON.stringify(diag.lastFallback) : 'nenhum'}`,
-      `Último erro: ${diag.lastError || 'nenhum'}`
-    ].join('\n');
-    log(`Diagnóstico do modelo:\n${text}`);
-    const action = await vscode.window.showInformationMessage(text, { modal: true }, 'Abrir logs');
-    if (action === 'Abrir logs') output.show(true);
+      `Último erro: ${diag.lastError || 'nenhum'}`,
+      `Pasta de logs: ${fileLogger.logsPath}`
+    ];
+    if (includeLogs) lines.push('', 'Últimas 100 linhas de log:', ...fileLogger.lastLines(100));
+    return lines.join('\n');
+  }
+
+  async function copyDiagnostics() {
+    const text = await buildDiagnosticText({ includeLogs: true });
+    await vscode.env.clipboard.writeText(text);
+    fileLogger.info('diagnostics', 'Diagnóstico copiado para a área de transferência.');
+    vscode.window.showInformationMessage('Diagnóstico do Offgrid copiado.');
+    return text;
+  }
+
+  async function showModelDiagnostics() {
+    const text = await buildDiagnosticText({ includeLogs: false });
+    fileLogger.info('diagnostics', `Diagnóstico do modelo:\n${text}`);
+    const action = await vscode.window.showInformationMessage(text, { modal: true }, 'Copiar diagnóstico', 'Abrir logs', 'Abrir pasta de logs');
+    if (action === 'Copiar diagnóstico') await copyDiagnostics();
+    else if (action === 'Abrir logs') output.show(true);
+    else if (action === 'Abrir pasta de logs') await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(fileLogger.logsPath));
   }
 
   async function showResourceDiagnostics() {
@@ -661,36 +918,42 @@ async function activate(context) {
       `Sistema: ${snapshot?.platform || process.platform}${process.platform === 'win32' ? ' (recursos avançados habilitados)' : ' (modo compatível; VRAM avançada somente no Windows)'}`,
       `RAM: ${summary.ram}`,
       `RAM do processo do motor: ${summary.engine}`,
+      `Estado do motor: ${diag.engineState || 'não iniciado'}`,
       `Processo do motor: ${diag.workerPid || 'não iniciado'}`,
       `GPU principal: ${summary.gpu}`,
       ...gpuLines,
       `Tentativas planejadas: ${(diag.attempts || []).map(item => `${item.gpu}/${item.gpuLayers}`).join(' → ') || 'nenhuma'}`
     ].join('\n');
-    log(`Diagnóstico de recursos:
-${text}`);
-    const action = await vscode.window.showInformationMessage(text, { modal: true }, 'Abrir logs');
-    if (action === 'Abrir logs') output.show(true);
+    fileLogger.info('diagnostics', `Diagnóstico de recursos:\n${text}`);
+    const action = await vscode.window.showInformationMessage(text, { modal: true }, 'Copiar diagnóstico', 'Abrir logs');
+    if (action === 'Copiar diagnóstico') await copyDiagnostics();
+    else if (action === 'Abrir logs') output.show(true);
   }
 
   async function showAgentDiagnostics() {
     const review = agent.getPendingReview();
+    const activeSession = sessions.snapshot().sessions.find(item => item.id === sessions.snapshot().activeSessionId);
     const text = [
       `Agente: ${agentState}`,
       `Modelo carregado: ${engine.isLoaded ? 'sim' : 'não'}`,
       `Backend: ${engine.backend || 'cpu'}`,
+      `Estado do motor: ${engine.diagnostics.engineState || 'não iniciado'}`,
       `Revisão pendente: ${review ? 'sim' : 'não'}`,
       `Arquivos pendentes: ${review?.files?.join(', ') || 'nenhum'}`,
       `Arquivo fixado: ${relative(pinnedUri) || 'nenhum'}`,
-      `Contextos adicionais: ${contextEntries.length}`
+      `Contextos adicionais: ${contextEntries.length}`,
+      `Metadados da sessão: ${JSON.stringify(activeSession?.metadata || {})}`
     ].join('\n');
-    logAgent(`Diagnóstico:\n${text}`);
-    const action = await vscode.window.showInformationMessage(text, { modal: true }, 'Abrir logs');
-    if (action === 'Abrir logs') output.show(true);
+    fileLogger.info('agent', `Diagnóstico:\n${text}`);
+    const action = await vscode.window.showInformationMessage(text, { modal: true }, 'Copiar diagnóstico', 'Abrir logs');
+    if (action === 'Copiar diagnóstico') await copyDiagnostics();
+    else if (action === 'Abrir logs') output.show(true);
   }
 
   chat.onSubmit(async (text, mode = 'chat') => {
     if (!text) return chat.finishAssistant();
-    chat.addMessage('user', mode === 'agent' ? `[Agente] ${text}` : text);
+    const labels = { agent: 'Agente', plan: 'Planejar', readOnly: 'Somente leitura' };
+    chat.addMessage('user', labels[mode] ? `[${labels[mode]}] ${text}` : text);
     await sessions.addMessage('user', text, mode);
     refreshDashboard();
     if (!engine.isLoaded) {
@@ -700,7 +963,7 @@ ${text}`);
         return chat.finishAssistant();
       }
     }
-    if (mode === 'agent') await runAgent(text);
+    if (['agent', 'plan', 'readOnly'].includes(mode)) await runAgent(text, mode);
     else await runChat(text);
   });
   chat.onAbort(() => abortController?.abort());
@@ -721,6 +984,8 @@ ${text}`);
       else if (message.type === 'openSettings') await vscode.commands.executeCommand('workbench.action.openSettings', `@ext:${context.extension.id}`);
       else if (message.type === 'showDiagnostics') await showModelDiagnostics();
       else if (message.type === 'showResources') await showResourceDiagnostics();
+      else if (message.type === 'copyDiagnostics') await copyDiagnostics();
+      else if (message.type === 'openLogsFolder') await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(fileLogger.logsPath));
       else if (message.type === 'newSession') await newSession();
       else if (message.type === 'selectSession') await switchSession(message.sessionId);
       else if (message.type === 'manageSessions') await manageSessions();
@@ -770,6 +1035,8 @@ ${text}`);
       if (options().modelPath) await loadConfiguredModel(true);
     }),
     vscode.commands.registerCommand('offgrid.showResourceDiagnostics', showResourceDiagnostics),
+    vscode.commands.registerCommand('offgrid.copyDiagnostics', copyDiagnostics),
+    vscode.commands.registerCommand('offgrid.openLogsFolder', () => vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(fileLogger.logsPath))),
     vscode.commands.registerCommand('offgrid.clearHardwareProfile', async () => {
       const current = options();
       await engine.refreshDiagnostics(true);
@@ -832,6 +1099,11 @@ ${text}`);
     }),
     vscode.window.onDidChangeActiveTextEditor(editor => followEditor(editor)),
     vscode.workspace.onDidChangeConfiguration(event => {
+      fileLogger.configure({ level: config().get('logLevel', 'debug'), diagnosticMode: config().get('diagnosticMode', false) });
+      if (event.affectsConfiguration('offgrid.diagnosticMode') && config().get('diagnosticMode', false)) {
+        fileLogger.warn('offgrid', '[Diagnostics] Modo diagnóstico ativado. Logs podem conter caminhos, prévias de prompts e resultados de ferramentas.');
+        vscode.window.showWarningMessage('Offgrid: o modo diagnóstico pode registrar caminhos e trechos de código nos logs locais.');
+      }
       if (suppressReload) return;
       if (['offgrid.modelPath', 'offgrid.gpu', 'offgrid.gpuLayers', 'offgrid.contextSize', 'offgrid.fallbackToCpu', 'offgrid.adaptiveGpu'].some(key => event.affectsConfiguration(key))) {
         clearTimeout(reloadTimer);
@@ -861,6 +1133,19 @@ ${text}`);
   } catch (error) {
     log(`Falha na inicialização: ${error instanceof Error ? error.stack || error.message : String(error)}`);
   }
+}
+
+
+function engineStateLabel(value) {
+  const labels = {
+    notStarted: 'não iniciado',
+    loading: 'carregando',
+    ready: 'pronto',
+    unloading: 'descarregando',
+    unloaded: 'descarregado',
+    error: 'erro'
+  };
+  return labels[value] || value || 'não iniciado';
 }
 
 function sanitizeContextEntries(entries) {

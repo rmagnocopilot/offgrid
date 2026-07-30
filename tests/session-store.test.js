@@ -15,6 +15,7 @@ test('cria, persiste, renomeia e alterna sessões', async () => {
     const firstId = store.snapshot().activeSessionId;
     await store.addMessage('user', 'Refatoração Angular', 'chat');
     await store.addMessage('assistant', 'Resposta local', 'chat');
+    await store.updateMetadata({ model: 'Qwen 3B', backend: 'VULKAN', contextSize: 4096, contextFiles: ['src/app.ts'], lastError: '' });
     assert.equal(store.getMessages().length, 2);
     assert.equal(store.snapshot().sessions[0].title, 'Refatoração Angular');
 
@@ -23,10 +24,17 @@ test('cria, persiste, renomeia e alterna sessões', async () => {
     await store.select(firstId);
     await store.togglePin(firstId);
     assert.equal(store.snapshot().sessions[0].pinned, true);
+    const duplicate = await store.duplicate(firstId);
+    assert.equal(duplicate.metadata.model, 'Qwen 3B');
+    assert.equal(duplicate.metadata.backend, 'VULKAN');
+    await store.select(firstId);
 
     const reloaded = new SessionStore(dir);
     await reloaded.init();
     assert.equal(reloaded.getMessages().length, 2);
+    const restored = reloaded.snapshot().sessions.find(item => item.id === firstId);
+    assert.equal(restored.metadata.contextSize, 4096);
+    assert.match(restored.searchText, /Refatoração Angular/);
   } finally {
     await fsp.rm(dir, { recursive: true, force: true });
   }

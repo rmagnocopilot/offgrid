@@ -17,9 +17,10 @@ const MAX_READ_BYTES = 1024 * 1024;
 const MAX_TOOL_OUTPUT_CHARS = 50000;
 
 class WorkspaceAgent {
-  constructor(context, onActivity = () => {}) {
+  constructor(context, onActivity = () => {}, logger = () => {}) {
     this.context = context;
     this.onActivity = onActivity;
+    this.logger = logger;
     this.staged = new Map();
     this.appliedFiles = [];
     this.reviewSummary = '';
@@ -74,7 +75,7 @@ class WorkspaceAgent {
           },
           required: ['pattern']
         },
-        handler: async ({ pattern }) => this.listWorkspaceFiles(pattern)
+        handler: async args => this.#tool('listWorkspaceFiles', args, () => this.listWorkspaceFiles(args.pattern))
       }),
 
       searchWorkspaceText: ({
@@ -87,7 +88,7 @@ class WorkspaceAgent {
           },
           required: ['query', 'pattern']
         },
-        handler: async ({ query, pattern }) => this.searchWorkspaceText(query, pattern)
+        handler: async args => this.#tool('searchWorkspaceText', args, () => this.searchWorkspaceText(args.query, args.pattern))
       }),
 
       searchDependencySource: ({
@@ -101,7 +102,7 @@ class WorkspaceAgent {
           },
           required: ['packageName', 'query', 'pattern']
         },
-        handler: async ({ packageName, query, pattern }) => this.searchDependencySource(packageName, query, pattern)
+        handler: async args => this.#tool('searchDependencySource', args, () => this.searchDependencySource(args.packageName, args.query, args.pattern))
       }),
 
       readFile: ({
@@ -115,7 +116,7 @@ class WorkspaceAgent {
           },
           required: ['filePath', 'startLine', 'endLine']
         },
-        handler: async ({ filePath, startLine, endLine }) => this.readFile(filePath, startLine, endLine)
+        handler: async args => this.#tool('readFile', args, () => this.readFile(args.filePath, args.startLine, args.endLine))
       }),
 
       stageReplace: ({
@@ -130,7 +131,7 @@ class WorkspaceAgent {
           },
           required: ['filePath', 'oldText', 'newText', 'replaceAll']
         },
-        handler: async ({ filePath, oldText, newText, replaceAll }) => this.stageReplace(filePath, oldText, newText, replaceAll)
+        handler: async args => this.#tool('stageReplace', args, () => this.stageReplace(args.filePath, args.oldText, args.newText, args.replaceAll))
       }),
 
       stageFile: ({
@@ -143,7 +144,7 @@ class WorkspaceAgent {
           },
           required: ['filePath', 'content']
         },
-        handler: async ({ filePath, content }) => this.stageFile(filePath, content)
+        handler: async args => this.#tool('stageFile', args, () => this.stageFile(args.filePath, args.content))
       }),
 
       applyChanges: ({
@@ -155,14 +156,28 @@ class WorkspaceAgent {
           },
           required: ['summary']
         },
-        handler: async ({ summary }) => this.applyChanges(summary)
+        handler: async args => this.#tool('applyChanges', args, () => this.applyChanges(args.summary))
       })
+    };
+
+    // Aliases descritivos aumentam a compatibilidade com modelos que usam nomes
+    // de ferramentas mais explícitos em vez dos nomes curtos originais.
+    functions.readWorkspaceFile = {
+      ...functions.readFile,
+      description: 'Alias de readFile. Lê um arquivo texto do workspace por linhas.',
+      handler: async args => this.#tool('readWorkspaceFile', args, () => this.readFile(args.filePath, args.startLine, args.endLine))
+    };
+    functions.prepareFileChange = {
+      ...functions.stageReplace,
+      description: 'Alias de stageReplace. Prepara uma substituição exata sem salvar o arquivo.',
+      handler: async args => this.#tool('prepareFileChange', args, () => this.stageReplace(args.filePath, args.oldText, args.newText, args.replaceAll))
     };
 
     if (readOnly) {
       delete functions.stageReplace;
       delete functions.stageFile;
       delete functions.applyChanges;
+      delete functions.prepareFileChange;
     }
     return functions;
   }
@@ -485,6 +500,22 @@ class WorkspaceAgent {
       return '**/*.{js,cjs,mjs,ts,d.ts,json}';
     }
     return value.slice(0, 240);
+  }
+
+  async #tool(name, args, operation) {
+    const startedAt = Date.now();
+    this.logger(`[Agent] Executando ferramenta: ${name}. Argumentos=${JSON.stringify(args || {}).slice(0, 4000)}`);
+    try {
+      const result = await operation();
+      let size = 0;
+      try { size = JSON.stringify(result).length; } catch { size = String(result).length; }
+      this.logger(`[Perf] tool.${name}: ${Date.now() - startedAt} ms; resultado=${size} caracteres`);
+      return result;
+    } catch (error) {
+      this.logger(`[Agent][ERRO] Falha em ${name}. Argumentos=${JSON.stringify(args || {}).slice(0, 4000)}
+${error?.stack || error}`);
+      throw error;
+    }
   }
 
   #result(value) {
