@@ -3,6 +3,21 @@
   "releaseTag": "models-v1",
   "chunkSize": "1900M",
   "models": [
+	{
+	  "id": "qwen2.5-coder-0.5b-q4_k_m",
+	  "displayName": "Qwen2.5-Coder-0.5B-Instruct Q4_K_M — Teste leve",
+	  "fileName": "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf",
+	  "description": "Modelo leve recomendado para testes e computadores com pouca RAM. Possui qualidade inferior aos modelos 3B e 7B.",
+	  "hardware": "CPU; recomendado para testes; contexto de 1024 a 2048",
+	  "approxSize": "~491 MB",
+	  "sha256": "1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32",
+	  "parts": [
+		"qwen2.5-coder-0.5b-instruct-q4_k_m.gguf"
+	  ],
+	  "license": "Apache-2.0",
+	  "commercialUse": true,
+	  "source": "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF"
+	},
     {
       "id": "qwen2.5-coder-3b-q4_k_m",
       "displayName": "Qwen2.5-Coder-3B-Instruct Q4_K_M",

@@ -1,61 +1,53 @@
-$ErrorActionPreference = 'Stop'
+[CmdletBinding()]
+param()
 
-function Convert-MiBToBytes([double]$value) {
-  return [int64]($value * 1024 * 1024)
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+function To-Int64([object]$value) {
+    if ($null -eq $value -or "$value" -eq '') { return [int64]0 }
+    return [Convert]::ToInt64($value, [Globalization.CultureInfo]::InvariantCulture)
 }
 
-$results = @()
+$items = @()
 $nvidia = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
 if ($nvidia) {
-  try {
-    $lines = & $nvidia.Source --query-gpu=name,memory.total,memory.used,memory.free --format=csv,noheader,nounits 2>$null
-    foreach ($line in $lines) {
-      $parts = $line -split ',' | ForEach-Object { $_.Trim() }
-      if ($parts.Count -ge 4) {
-        $results += [pscustomobject]@{
-          name = $parts[0]
-          vendor = 'NVIDIA'
-          totalBytes = Convert-MiBToBytes ([double]$parts[1])
-          usedBytes = Convert-MiBToBytes ([double]$parts[2])
-          availableBytes = Convert-MiBToBytes ([double]$parts[3])
-          dedicated = $true
-          source = 'nvidia-smi'
-          note = 'Memória dedicada informada pelo driver NVIDIA.'
+    $rows = & $nvidia.Source --query-gpu=name,memory.total,memory.used,memory.free --format=csv,noheader,nounits 2>$null
+    foreach ($row in $rows) {
+        $parts = $row -split ',' | ForEach-Object { $_.Trim() }
+        if ($parts.Count -ge 4) {
+            $total = (To-Int64 $parts[1]) * [int64]1MB
+            $used = (To-Int64 $parts[2]) * [int64]1MB
+            $free = (To-Int64 $parts[3]) * [int64]1MB
+            $items += [pscustomobject]@{
+                name = $parts[0]
+                totalBytes = $total
+                usedBytes = $used
+                freeBytes = $free
+                dedicated = $true
+                source = 'nvidia-smi'
+            }
         }
-      }
     }
-  } catch { }
 }
 
-if ($results.Count -eq 0) {
-  $controllers = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name })
-  $dedicatedUsage = 0
-  $sharedUsage = 0
-  try {
-    $samples = (Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage','\GPU Adapter Memory(*)\Shared Usage' -ErrorAction Stop).CounterSamples
-    foreach ($sample in $samples) {
-      if ($sample.Path -like '*Dedicated Usage') { $dedicatedUsage += [int64]$sample.CookedValue }
-      elseif ($sample.Path -like '*Shared Usage') { $sharedUsage += [int64]$sample.CookedValue }
+if ($items.Count -eq 0) {
+    $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
+    foreach ($gpu in $controllers) {
+        $total = To-Int64 $gpu.AdapterRAM
+        # WMI não fornece uso atual confiável. Mantemos zero/total sem inventar precisão.
+        $used = [int64]0
+        $free = if ($total -gt 0) { [Math]::Max([int64]0, [int64]($total - $used)) } else { [int64]0 }
+        $items += [pscustomobject]@{
+            name = [string]$gpu.Name
+            totalBytes = $total
+            usedBytes = $used
+            freeBytes = $free
+            dedicated = $false
+            source = 'windows-cim'
+        }
     }
-  } catch { }
-
-  foreach ($controller in $controllers) {
-    $total = 0
-    if ($controller.AdapterRAM) { $total = [int64]$controller.AdapterRAM }
-    $vendor = if ($controller.Name -match 'NVIDIA') { 'NVIDIA' } elseif ($controller.Name -match 'Intel') { 'Intel' } elseif ($controller.Name -match 'AMD|Radeon') { 'AMD' } else { '' }
-    $used = if ($controllers.Count -eq 1) { $dedicatedUsage } else { 0 }
-    $available = if ($total -gt 0 -and $used -ge 0) { [Math]::Max(0, $total - $used) } else { $null }
-    $results += [pscustomobject]@{
-      name = [string]$controller.Name
-      vendor = $vendor
-      totalBytes = if ($total -gt 0) { $total } else { $null }
-      usedBytes = if ($used -gt 0) { $used } else { $null }
-      availableBytes = $available
-      dedicated = $vendor -ne 'Intel'
-      source = 'windows-cim-performance-counter'
-      note = 'Estimativa do Windows. GPUs integradas usam memória compartilhada e podem não expor orçamento preciso.'
-    }
-  }
 }
 
-@($results) | ConvertTo-Json -Depth 4 -Compress
+@($items) | ConvertTo-Json -Depth 4 -Compress
