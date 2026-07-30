@@ -312,34 +312,98 @@ async function sessionAction(s: Services, action: string, id: string, value?: st
 async function refreshUi(s: Services, busy = s.engine.isBusy): Promise<void> {
   const cfg = vscode.workspace.getConfiguration('offgrid');
   const mock = cfg.get<boolean>('developmentMock', false);
-  let engine: EngineDiagnostics = s.engine.diagnostics;
-  if (mock) engine = { ...engine, loaded: true, loading: false, engineState: 'ready', modelPath: 'Qwen2.5-Coder-3B-Instruct-Q4_K_M.mock.gguf', backend: 'vulkan', contextSize: 4096, gpuLayers: 12, workerPid: 12345 };
   const contextState = s.contextManager.state;
+
+  let engine: EngineDiagnostics = s.engine.diagnostics;
   let models = s.catalog.list(modelPathForActive(s), engine.modelPath, s.modelErrors);
   let activeModelId = s.activeModelId;
   let pendingReview = s.tools.pendingReview;
-  if (mock && models[0]) {
-    activeModelId = models[0].id;
-    models = models.map((model, index) => ({ ...model, state: index === 0 ? 'loaded' : model.state }));
-    pendingReview = { summary: 'Simulação visual de alteração', files: ['src/exemplo.ts'] };
+
+  const mockModel = models[0];
+
+  if (mock && mockModel) {
+    activeModelId = mockModel.id;
+
+    models = models.map(model => ({
+      ...model,
+      state:
+        model.id === mockModel.id
+          ? 'loaded'
+          : model.lastError
+            ? 'error'
+            : model.fileSize > 0
+              ? 'installed'
+              : 'notInstalled'
+    }));
+
+    pendingReview = {
+      summary: 'Simulação visual de alteração',
+      files: ['src/exemplo.ts']
+    };
+
     engine = {
       ...engine,
+      loaded: true,
+      loading: false,
+      engineState: 'ready',
+      modelPath: mockModel.fileName,
+      backend: 'vulkan',
+      contextSize: 4096,
+      gpuLayers: 12,
+      workerPid: 12345,
       resources: {
-        capturedAt: new Date().toISOString(), platform: process.platform,
-        systemRam: { totalBytes: 32 * 1024 ** 3, usedBytes: 20 * 1024 ** 3, freeBytes: 12 * 1024 ** 3 },
-        engineRam: { pid: 12345, workingSetBytes: 2.7 * 1024 ** 3 },
-        gpus: [{ name: 'GPU simulada', totalBytes: 4 * 1024 ** 3, usedBytes: 2 * 1024 ** 3, freeBytes: 2 * 1024 ** 3, dedicated: true, source: 'nvidia-smi' }]
+        capturedAt: new Date().toISOString(),
+        platform: process.platform,
+        systemRam: {
+          totalBytes: 32 * 1024 ** 3,
+          usedBytes: 20 * 1024 ** 3,
+          freeBytes: 12 * 1024 ** 3
+        },
+        engineRam: {
+          pid: 12345,
+          workingSetBytes: 2.7 * 1024 ** 3
+        },
+        gpus: [
+          {
+            name: 'GPU simulada',
+            totalBytes: 4 * 1024 ** 3,
+            usedBytes: 2 * 1024 ** 3,
+            freeBytes: 2 * 1024 ** 3,
+            dedicated: true,
+            source: 'nvidia-smi'
+          }
+        ]
       }
     };
   }
+
   const state: UiState = {
     version: s.context.extension.packageJSON.version,
-    engine, models, activeModelId, mode: s.mode, diagnosticsPanel: s.diagnosticsPanel,
-    pinnedFile: contextState.pinnedFile, autoFile: contextState.autoFile, contextItems: contextState.items,
-    sessions: s.sessions.list(), currentSessionId: s.sessions.current().id, pendingReview, busy
+    engine,
+    models,
+    activeModelId,
+    mode: s.mode,
+    diagnosticsPanel: s.diagnosticsPanel,
+    pinnedFile: contextState.pinnedFile,
+    autoFile: contextState.autoFile,
+    contextItems: contextState.items,
+    sessions: s.sessions.list(),
+    currentSessionId: s.sessions.current().id,
+    pendingReview,
+    busy
   };
-  s.statusBar.text = engine.engineState === 'loading' ? '$(loading~spin) Offgrid' : engine.loaded ? `$(plug) ${shortModelName(engine.modelPath)} [${engine.backend.toUpperCase()}]` : '$(plug) Offgrid';
-  s.statusBar.tooltip = engine.lastError ? `Offgrid: ${engine.lastError}` : `Offgrid · Motor ${engine.engineState}`;
+
+  s.statusBar.text =
+    engine.engineState === 'loading'
+      ? '$(loading~spin) Offgrid'
+      : engine.loaded
+        ? `$(plug) ${shortModelName(engine.modelPath)} [${engine.backend.toUpperCase()}]`
+        : '$(plug) Offgrid';
+
+  s.statusBar.tooltip = engine.lastError
+    ? `Offgrid: ${engine.lastError}`
+    : `Offgrid · Motor ${engine.engineState}`;
+
   await s.view.postState(state);
 }
 
