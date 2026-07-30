@@ -76,11 +76,14 @@
       }
     }
   },
-  "dependencies": { "node-llama-cpp": "^3.0.0" },
-  "devDependencies": {
+    "devDependencies": {
     "@types/node": "^20.17.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.6.0",
     "typescript": "^5.8.3"
+  },
+  "allowScripts": {
+    "node-llama-cpp@3.19.1": true
   }
+}
 }
