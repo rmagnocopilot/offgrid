@@ -1,21 +1,6 @@
-$readmePath = ".\README.md"
-
-$logo = @'
 <p align="center">
   <img src="resources/branding/offgrid-logo.png" alt="Offgrid" width="260">
 </p>
-
-'@
-
-$readme = [System.IO.File]::ReadAllText($readmePath)
-
-if ($readme -notmatch 'resources/branding/offgrid-logo\.png') {
-    [System.IO.File]::WriteAllText(
-        $readmePath,
-        $logo + $readme,
-        [System.Text.UTF8Encoding]::new($false)
-    )
-}
 
 # Offgrid 2.0.1
 
@@ -136,3 +121,4 @@ Comandos disponíveis:
 - `Offgrid: Abrir Pasta de Dados`;
 - `Offgrid: Abrir Pasta de Logs`;
 - `Offgrid: Copiar Diagnóstico Completo`.
+
