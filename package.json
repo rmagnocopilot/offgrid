@@ -35,7 +35,7 @@
     "compile": "tsc -p tsconfig.json",
     "watch": "tsc -watch -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run compile && node --test tests/*.test.cjs",
+    "test": "npm run compile && node --test",
     "package": "npm run compile && npx --yes @vscode/vsce package",
     "vscode:prepublish": "npm run compile"
   },
