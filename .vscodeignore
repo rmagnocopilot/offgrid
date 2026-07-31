@@ -10,3 +10,4 @@ scripts/**
 INSTRUCOES-*.txt
 UPDATE-MANIFEST*.txt
 node_modules/.cache/**
+resources/webview/codicon.svg

@@ -2,14 +2,34 @@
   "name": "offgrid",
   "displayName": "Offgrid",
   "description": "Assistente de programação local e offline para VS Code, com Chat, Agente por ferramentas, modelos GGUF e revisão visual.",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "publisher": "rmagnocopilot",
   "license": "MIT",
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Machine Learning", "Programming Languages", "Other"],
-  "keywords": ["ai", "offline", "local llm", "gguf", "agent", "qwen", "typescript"],
-  "repository": { "type": "git", "url": "https://github.com/rmagnocopilot/offgrid.git" },
-  "activationEvents": ["onStartupFinished", "onView:offgrid.chatView"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "offline",
+    "local llm",
+    "gguf",
+    "agent",
+    "qwen",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rmagnocopilot/offgrid.git"
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:offgrid.chatView"
+  ],
   "main": "./out/extension.js",
   "scripts": {
     "compile": "tsc -p tsconfig.json",
@@ -21,62 +41,257 @@
   },
   "contributes": {
     "commands": [
-      { "command": "offgrid.openChat", "title": "Offgrid: Abrir Chat", "icon": "$(comment-discussion)" },
-      { "command": "offgrid.manageModels", "title": "Offgrid: Gerenciar Modelos", "icon": "$(server-environment)" },
-      { "command": "offgrid.unloadModel", "title": "Offgrid: Liberar Modelo da Memória", "icon": "$(debug-disconnect)" },
-      { "command": "offgrid.reloadModel", "title": "Offgrid: Recarregar Modelo Atual", "icon": "$(refresh)" },
-      { "command": "offgrid.restartEngine", "title": "Offgrid: Reiniciar Processo do Motor", "icon": "$(server-process)" },
-      { "command": "offgrid.copyDiagnostics", "title": "Offgrid: Copiar Diagnóstico Completo", "icon": "$(copy)" },
-      { "command": "offgrid.openLogsFolder", "title": "Offgrid: Abrir Pasta de Logs", "icon": "$(folder-opened)" },
-      { "command": "offgrid.showResourceDiagnostics", "title": "Offgrid: Atualizar RAM e VRAM", "icon": "$(dashboard)" },
-      { "command": "offgrid.clearHardwareProfile", "title": "Offgrid: Limpar Perfil Automático de Hardware", "icon": "$(trash)" },
-      { "command": "offgrid.newSession", "title": "Offgrid: Nova Sessão", "icon": "$(add)" },
-      { "command": "offgrid.pinActiveFile", "title": "Offgrid: Fixar Arquivo Ativo", "icon": "$(pin)" },
-      { "command": "offgrid.useAutoFile", "title": "Offgrid: Usar Arquivo Ativo Automaticamente", "icon": "$(eye)" },
-      { "command": "offgrid.toggleMock", "title": "Offgrid: Alternar Modo Visual Simulado", "icon": "$(beaker)" }
+      {
+        "command": "offgrid.openChat",
+        "title": "Offgrid: Abrir Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "offgrid.manageModels",
+        "title": "Offgrid: Gerenciar Modelos",
+        "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "offgrid.unloadModel",
+        "title": "Offgrid: Liberar Modelo da Memória",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "offgrid.reloadModel",
+        "title": "Offgrid: Recarregar Modelo Atual",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "offgrid.restartEngine",
+        "title": "Offgrid: Reiniciar Processo do Motor",
+        "icon": "$(redo)"
+      },
+      {
+        "command": "offgrid.copyDiagnostics",
+        "title": "Offgrid: Copiar Diagnóstico Completo",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "offgrid.openModelsFolder",
+        "title": "Offgrid: Abrir Pasta dos Modelos",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "offgrid.openDataFolder",
+        "title": "Offgrid: Abrir Pasta de Dados",
+        "icon": "$(database)"
+      },
+      {
+        "command": "offgrid.openLogsFolder",
+        "title": "Offgrid: Abrir Pasta de Logs",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "offgrid.showResourceDiagnostics",
+        "title": "Offgrid: Atualizar RAM e VRAM",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "offgrid.clearHardwareProfile",
+        "title": "Offgrid: Limpar Perfil Automático de Hardware",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "offgrid.newSession",
+        "title": "Offgrid: Nova Sessão",
+        "icon": "$(add)"
+      },
+      {
+        "command": "offgrid.pinActiveFile",
+        "title": "Offgrid: Fixar Arquivo Ativo",
+        "icon": "$(pinned)"
+      },
+      {
+        "command": "offgrid.useAutoFile",
+        "title": "Offgrid: Usar Arquivo Ativo Automaticamente",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "offgrid.toggleMock",
+        "title": "Offgrid: Alternar Modo Visual Simulado",
+        "icon": "$(beaker)"
+      }
     ],
     "viewsContainers": {
       "activitybar": [
-        { "id": "offgrid", "title": "Offgrid", "icon": "resources/icons/offgrid.svg" }
+        {
+          "id": "offgrid",
+          "title": "Offgrid",
+          "icon": "resources/icons/offgrid.svg"
+        }
       ]
     },
     "views": {
       "offgrid": [
-        { "id": "offgrid.chatView", "name": "Assistente Local", "type": "webview" }
+        {
+          "id": "offgrid.chatView",
+          "name": "Assistente Local",
+          "type": "webview"
+        }
       ]
     },
     "menus": {
       "view/title": [
-        { "command": "offgrid.newSession", "when": "view == offgrid.chatView", "group": "navigation@1" },
-        { "command": "offgrid.manageModels", "when": "view == offgrid.chatView", "group": "navigation@2" },
-        { "command": "offgrid.copyDiagnostics", "when": "view == offgrid.chatView", "group": "navigation@3" }
+        {
+          "command": "offgrid.newSession",
+          "when": "view == offgrid.chatView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "offgrid.manageModels",
+          "when": "view == offgrid.chatView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "offgrid.copyDiagnostics",
+          "when": "view == offgrid.chatView",
+          "group": "navigation@3"
+        }
       ]
     },
     "configuration": {
       "title": "Offgrid",
       "properties": {
-        "offgrid.modelPath": { "type": "string", "default": "", "description": "Caminho absoluto opcional para um modelo GGUF já instalado." },
-        "offgrid.gpu": { "type": "string", "enum": ["auto", "cpu", "cuda", "vulkan", "metal"], "default": "auto", "description": "Backend solicitado ao node-llama-cpp." },
-        "offgrid.gpuLayers": { "type": ["string", "number"], "default": "auto", "description": "Camadas na GPU: auto ou um número inteiro maior ou igual a zero." },
-        "offgrid.contextSize": { "type": "number", "default": 4096, "minimum": 1024, "maximum": 32768, "description": "Janela de contexto do modelo." },
-        "offgrid.maxTokens": { "type": "number", "default": 1024, "minimum": 64, "maximum": 8192, "description": "Máximo de tokens por resposta." },
-        "offgrid.temperature": { "type": "number", "default": 0.2, "minimum": 0, "maximum": 2, "description": "Temperatura de geração." },
-        "offgrid.includeWorkspaceContext": { "type": "boolean", "default": true, "description": "Inclui arquivos priorizados no Chat simples." },
-        "offgrid.maxAgentSteps": { "type": "number", "default": 10, "minimum": 1, "maximum": 30, "description": "Limite de rodadas do Agente." },
-        "offgrid.agentApprovalMode": { "type": "string", "enum": ["ask", "readOnly", "full"], "default": "ask", "description": "ask revisa antes de salvar; readOnly bloqueia escrita; full aplica com backup." },
-        "offgrid.fallbackToCpu": { "type": "boolean", "default": true, "description": "Tenta CPU após falha de GPU." },
-        "offgrid.adaptiveGpu": { "type": "boolean", "default": true, "description": "Usa perfis progressivos de camadas de GPU no Windows." },
-        "offgrid.autoLoadModel": { "type": "boolean", "default": true, "description": "Restaura o último modelo ativo ao iniciar." },
-        "offgrid.resourceMonitoring": { "type": "boolean", "default": true, "description": "Atualiza RAM e VRAM periodicamente." },
-        "offgrid.resourceRefreshSeconds": { "type": "number", "default": 30, "minimum": 10, "maximum": 300, "description": "Intervalo do diagnóstico de recursos." },
-        "offgrid.diagnosticsPanel": { "type": "string", "enum": ["hidden", "compact", "expanded", "onError"], "default": "compact", "description": "Visibilidade do diagnóstico no painel." },
-        "offgrid.logLevel": { "type": "string", "enum": ["trace", "debug", "info", "warn", "error"], "default": "debug", "description": "Nível mínimo dos logs." },
-        "offgrid.diagnosticMode": { "type": "boolean", "default": false, "description": "Registra prompts, tool calls, tempos e stack traces. Pode incluir caminhos e trechos de código." },
-        "offgrid.developmentMock": { "type": "boolean", "default": false, "description": "Simula estados visuais sem carregar modelo. Destinado a desenvolvimento." }
+        "offgrid.modelPath": {
+          "type": "string",
+          "default": "",
+          "description": "Caminho absoluto opcional para um modelo GGUF já instalado."
+        },
+        "offgrid.gpu": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "cpu",
+            "cuda",
+            "vulkan",
+            "metal"
+          ],
+          "default": "auto",
+          "description": "Backend solicitado ao node-llama-cpp."
+        },
+        "offgrid.gpuLayers": {
+          "type": [
+            "string",
+            "number"
+          ],
+          "default": "auto",
+          "description": "Camadas na GPU: auto ou um número inteiro maior ou igual a zero."
+        },
+        "offgrid.contextSize": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 1024,
+          "maximum": 32768,
+          "description": "Janela de contexto do modelo."
+        },
+        "offgrid.maxTokens": {
+          "type": "number",
+          "default": 1024,
+          "minimum": 64,
+          "maximum": 8192,
+          "description": "Máximo de tokens por resposta."
+        },
+        "offgrid.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Temperatura de geração."
+        },
+        "offgrid.includeWorkspaceContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inclui arquivos priorizados no Chat simples."
+        },
+        "offgrid.maxAgentSteps": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 30,
+          "description": "Limite de rodadas do Agente."
+        },
+        "offgrid.agentApprovalMode": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "readOnly",
+            "full"
+          ],
+          "default": "ask",
+          "description": "ask revisa antes de salvar; readOnly bloqueia escrita; full aplica com backup."
+        },
+        "offgrid.fallbackToCpu": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tenta CPU após falha de GPU."
+        },
+        "offgrid.adaptiveGpu": {
+          "type": "boolean",
+          "default": true,
+          "description": "Usa perfis progressivos de camadas de GPU no Windows."
+        },
+        "offgrid.autoLoadModel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Restaura o último modelo ativo ao iniciar."
+        },
+        "offgrid.resourceMonitoring": {
+          "type": "boolean",
+          "default": true,
+          "description": "Atualiza RAM e VRAM periodicamente."
+        },
+        "offgrid.resourceRefreshSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 10,
+          "maximum": 300,
+          "description": "Intervalo do diagnóstico de recursos."
+        },
+        "offgrid.diagnosticsPanel": {
+          "type": "string",
+          "enum": [
+            "hidden",
+            "compact",
+            "expanded",
+            "onError"
+          ],
+          "default": "compact",
+          "description": "Visibilidade do diagnóstico no painel."
+        },
+        "offgrid.logLevel": {
+          "type": "string",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "default": "debug",
+          "description": "Nível mínimo dos logs."
+        },
+        "offgrid.diagnosticMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Registra prompts, tool calls, tempos e stack traces. Pode incluir caminhos e trechos de código."
+        },
+        "offgrid.developmentMock": {
+          "type": "boolean",
+          "default": false,
+          "description": "Simula estados visuais sem carregar modelo. Destinado a desenvolvimento."
+        }
       }
     }
   },
-    "devDependencies": {
+  "dependencies": {
+    "node-llama-cpp": "3.19.1"
+  },
+  "devDependencies": {
     "@types/node": "^20.17.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.6.0",

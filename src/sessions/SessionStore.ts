@@ -56,6 +56,12 @@ export class SessionStore {
     this.sessions.push(clone); this.currentSessionId = clone.id; void this.save(); return clone;
   }
   clear(id = this.currentSessionId): void { const session = this.get(id); session.messages = []; this.touch(session); }
+  archiveCurrent(): boolean {
+    const session = this.current();
+    if (!session.messages.length) return false;
+    this.create('Nova conversa');
+    return true;
+  }
   addMessage(message: Omit<ChatMessage, 'id' | 'createdAt'>, id = this.currentSessionId): ChatMessage {
     const session = this.get(id);
     const value: ChatMessage = { ...message, id: randomUUID(), createdAt: new Date().toISOString() };

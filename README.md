@@ -1,4 +1,23 @@
-# Offgrid 2.0
+$readmePath = ".\README.md"
+
+$logo = @'
+<p align="center">
+  <img src="resources/branding/offgrid-logo.png" alt="Offgrid" width="260">
+</p>
+
+'@
+
+$readme = [System.IO.File]::ReadAllText($readmePath)
+
+if ($readme -notmatch 'resources/branding/offgrid-logo\.png') {
+    [System.IO.File]::WriteAllText(
+        $readmePath,
+        $logo + $readme,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
+# Offgrid 2.0.1
 
 Assistente local e offline para Visual Studio Code, reescrito em **TypeScript**. A arquitetura segue a separação usada pelo Unplugged entre Agente, ferramentas, contexto, segurança, motor LLM e interface, preservando os recursos adicionais construídos no Offgrid.
 
@@ -102,11 +121,18 @@ npm run package
 Arquivo esperado:
 
 ```text
-offgrid-2.0.0.vsix
+offgrid-2.0.1.vsix
 ```
 
 Os modelos em `globalStorage/rmagnocopilot.offgrid/models` permanecem após a atualização do VSIX.
 
-## Logs
+## Logs e pastas
 
-O canal `Exibir → Saída → Offgrid` e a pasta de logs registram motor, modelos, Agente e diagnósticos. Os arquivos são UTF-8, giram em 10 MB e mantêm até dez arquivos por categoria.
+O canal `Exibir → Saída → Offgrid` e a pasta de logs registram motor, download, modelos, Agente e diagnósticos. Os nomes e horários dos arquivos usam a data local do computador. Os arquivos são UTF-8, giram em 10 MB e mantêm até dez arquivos por categoria.
+
+Comandos disponíveis:
+
+- `Offgrid: Abrir Pasta dos Modelos`;
+- `Offgrid: Abrir Pasta de Dados`;
+- `Offgrid: Abrir Pasta de Logs`;
+- `Offgrid: Copiar Diagnóstico Completo`.

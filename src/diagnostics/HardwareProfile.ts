@@ -53,7 +53,20 @@ export class HardwareProfileStore {
   private readonly file: string;
   constructor(storagePath: string) { this.file = path.join(storagePath, 'hardware-profiles.json'); }
   async init(): Promise<void> {
-    try { this.profiles = JSON.parse(await fsp.readFile(this.file, 'utf8')) as StoredProfile[]; } catch { this.profiles = []; }
+    try {
+      const parsed: unknown = JSON.parse(await fsp.readFile(this.file, 'utf8'));
+      const candidates = Array.isArray(parsed)
+        ? parsed
+        : isRecord(parsed) && Array.isArray(parsed.profiles)
+          ? parsed.profiles
+          : isRecord(parsed)
+            ? Object.values(parsed)
+            : [];
+
+      this.profiles = candidates.filter(isStoredProfile);
+    } catch {
+      this.profiles = [];
+    }
   }
   get(modelPath: string): LoadAttempt | undefined {
     return this.profiles.find(item => item.modelKey === path.basename(modelPath) && item.machineKey === machineKey())?.attempt;
@@ -67,6 +80,19 @@ export class HardwareProfileStore {
     await fsp.writeFile(this.file, JSON.stringify(this.profiles, null, 2), 'utf8');
   }
   async clear(): Promise<void> { this.profiles = []; await fsp.unlink(this.file).catch(() => undefined); }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isStoredProfile(value: unknown): value is StoredProfile {
+  if (!isRecord(value) || typeof value.modelKey !== 'string' || typeof value.machineKey !== 'string' || typeof value.updatedAt !== 'string') return false;
+  if (!isRecord(value.attempt) || typeof value.attempt.reason !== 'string') return false;
+  const gpu = value.attempt.gpu;
+  const gpuLayers = value.attempt.gpuLayers;
+  return ['auto', 'cpu', 'cuda', 'vulkan', 'metal'].includes(String(gpu))
+    && (gpuLayers === 'auto' || (typeof gpuLayers === 'number' && Number.isFinite(gpuLayers) && gpuLayers >= 0));
 }
 
 function machineKey(): string { return `${process.platform}:${process.arch}:${os.hostname()}:${Math.round(os.totalmem() / 1024 ** 3)}`; }

@@ -3,6 +3,18 @@ import type { EngineDiagnostics, EngineLoadOptions, EffectiveBackend, UnloadRepo
 
 export type EngineLogger = (level: 'trace' | 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 
+type NodeLlamaCppRuntime = typeof import('node-llama-cpp');
+
+/**
+ * node-llama-cpp é ESM. Como o Offgrid ainda é compilado em CommonJS para o
+ * Extension Host, o TypeScript não pode transformar este import() em require().
+ * A Function preserva o import dinâmico nativo em tempo de execução.
+ */
+export async function importNodeLlamaCppRuntime(): Promise<NodeLlamaCppRuntime> {
+  const nativeImport = Function('return import("node-llama-cpp")') as () => Promise<NodeLlamaCppRuntime>;
+  return nativeImport();
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error);
 }
@@ -72,7 +84,7 @@ export class LlamaEngine {
     const started = Date.now();
     try {
       await this.disposeResources('nova carga', false);
-      const runtime = await import('node-llama-cpp');
+      const runtime = await importNodeLlamaCppRuntime();
       const requested = options.gpu;
       const llamaOptions: Record<string, unknown> = { logLevel: runtime.LlamaLogLevel?.warn };
       if (requested !== 'auto') llamaOptions.gpu = requested === 'cpu' ? false : requested;

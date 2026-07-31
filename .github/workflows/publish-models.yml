@@ -42,8 +42,23 @@ jobs:
           else
             gh release create "$RELEASE_TAG" \
               --title "Modelos GGUF para Offgrid" \
-              --notes "Modelos divididos em partes menores que 2 GB. A extensão remonta e valida o SHA-256 localmente. Consulte MODEL_LICENSES.md antes do uso."
+              --notes "Modelos divididos em partes menores que 2 GB. A extensão remonta e valida o SHA-256 localmente. Consulte docs/MODEL_LICENSES.md antes do uso."
           fi
+
+      - name: Baixar, validar e publicar Qwen 0.5B
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="qwen2.5-coder-0.5b-instruct-q4_k_m.gguf"
+          URL="https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/${FILE}?download=true"
+          EXPECTED="1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32"
+          mkdir -p work/0.5b
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "work/0.5b/$FILE" "$URL"
+          ACTUAL="$(sha256sum "work/0.5b/$FILE" | awk '{print $1}')"
+          [[ "$ACTUAL" == "$EXPECTED" ]] || { echo "SHA-256 inválido: $ACTUAL"; exit 1; }
+          gh release upload "$RELEASE_TAG" "work/0.5b/$FILE" --clobber
+          rm -rf work/0.5b
 
       - name: Baixar, validar e publicar Qwen 7B
         shell: bash
@@ -99,5 +114,5 @@ jobs:
               --output release-metadata/QWEN-3B-RESEARCH-LICENSE.txt \
               "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct/resolve/main/LICENSE"
           fi
-          cp models/manifest.json MODEL_LICENSES.md release-metadata/
+          cp models/manifest.json docs/MODEL_LICENSES.md release-metadata/
           gh release upload "$RELEASE_TAG" release-metadata/* --clobber
