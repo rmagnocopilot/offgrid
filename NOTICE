@@ -3,3 +3,7 @@ Offgrid 2.0.0
 Arquitetura TypeScript inspirada no projeto Unplugged, de marquesbmc, licenciado sob MIT.
 Esta implementação preserva o gerenciamento corporativo de modelos por GitHub Releases,
 o motor isolado, a interface responsiva e os diagnósticos do Offgrid.
+
+A interface webview inclui o sprite SVG Codicons de Microsoft Corporation,
+versão 0.0.46-24, licenciado sob Creative Commons Attribution 4.0.
+Fonte: microsoft/vscode-codicons.
