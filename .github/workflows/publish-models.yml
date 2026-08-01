@@ -152,30 +152,8 @@ jobs:
           # Publica os binários no release
           gh release upload "$RELEASE_TAG"             work/bins/llama-server-win-x64.exe             work/bins/llama-server-linux-x64             work/bins/llama-server-darwin-arm64             work/bins/llama-server-darwin-x64             --clobber
 
-          # Atualiza os SHA-256 no manifest.json
-          python3 - <<PYEOF
-import json, re
-
-with open('models/manifest.json', 'r') as f:
-    manifest = json.load(f)
-
-sha_map = {
-    'llama-server-win-x64.exe': '${WIN_SHA}',
-    'llama-server-linux-x64': '${LINUX_SHA}',
-    'llama-server-darwin-arm64': '${MACOS_ARM_SHA}',
-    'llama-server-darwin-x64': '${MACOS_X64_SHA}'
-}
-
-for binary in manifest.get('binaries', []):
-    if binary['fileName'] in sha_map:
-        binary['sha256'] = sha_map[binary['fileName']]
-
-with open('models/manifest.json', 'w') as f:
-    json.dump(manifest, f, ensure_ascii=False, indent=2)
-    f.write('\n')
-
-print('manifest.json atualizado com SHA-256 dos binários.')
-PYEOF
+          # Atualiza os SHA-256 no manifest.json via script externo
+          python3 scripts/update-binary-sha.py "$WIN_SHA" "$LINUX_SHA" "$MACOS_ARM_SHA" "$MACOS_X64_SHA" 
 
           rm -rf work/bins
 
