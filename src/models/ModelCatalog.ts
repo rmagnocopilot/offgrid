@@ -2,7 +2,18 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ModelDefinition, ModelStatus } from '../types/contracts';
 
-interface Manifest { schemaVersion: number; releaseTag: string; models: ModelDefinition[] }
+export interface BinaryDefinition {
+  fileName: string;
+  sha256: string;
+  description: string;
+}
+
+interface Manifest {
+  schemaVersion: number;
+  releaseTag: string;
+  models: ModelDefinition[];
+  binaries: BinaryDefinition[];
+}
 
 export class ModelCatalog {
   readonly manifest: Manifest;
@@ -35,6 +46,12 @@ export class ModelCatalog {
     return model;
   }
 
+  getBinary(fileName: string): BinaryDefinition {
+    const binary = this.manifest.binaries?.find(b => b.fileName === fileName);
+    if (!binary) throw new Error(`Binário desconhecido no manifesto: ${fileName}`);
+    return binary;
+  }
+
   releaseBaseUrl(repositoryUrl: string): string {
     const match = repositoryUrl.replace(/\.git$/, '').match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)$/i);
     if (!match) throw new Error('repository do package.json precisa apontar para um repositório GitHub válido.');
@@ -65,6 +82,8 @@ function validateManifest(value: unknown, manifestPath: string): Manifest {
   if (typeof candidate.schemaVersion !== 'number' || !Number.isInteger(candidate.schemaVersion) || !candidate.releaseTag || !Array.isArray(candidate.models)) {
     throw new Error(`Manifesto de modelos incompleto: ${manifestPath}`);
   }
+  // binaries é opcional para retrocompatibilidade
+  if (!Array.isArray(candidate.binaries)) candidate.binaries = [];
   const ids = new Set<string>();
   const files = new Set<string>();
   for (const model of candidate.models) {

@@ -14,9 +14,10 @@ import { ChatViewProvider, type UiEvent } from './ui/ChatViewProvider';
 import { ChangePreviewProvider } from './ui/ChangePreviewProvider';
 import { ContextManager } from './context/ContextManager';
 import { buildTemporalContext } from './context/TemporalContext';
-import { schemasForMode } from './tools/ToolRegistry';
+import { buildAgentWorkspaceContext } from './agent/WorkspaceContextBuilder';
+import { schemasForMode, validateToolArguments } from './tools/ToolRegistry';
 import type {
-  ApprovalMode, ConversationMode, DiagnosticsPanelMode, EngineDiagnostics, EngineLoadOptions,
+  AgentAutonomy, ApprovalMode, ConversationMode, DiagnosticsPanelMode, EngineDiagnostics, EngineLoadOptions,
   LogLevel, ModelDefinition, ModelStatus, ToolCall, UiState
 } from './types/contracts';
 
@@ -39,7 +40,10 @@ interface Services {
   statusBar: vscode.StatusBarItem;
   controller?: AbortController;
   activeModelId?: string;
+  /** Definido enquanto uma carga de modelo está prestes a iniciar ou em andamento. */
+  pendingLoadModelId?: string;
   mode: ConversationMode;
+  autonomy: AgentAutonomy;
   diagnosticsPanel: DiagnosticsPanelMode;
   modelErrors: Record<string, string>;
   monitor?: NodeJS.Timeout;
@@ -65,7 +69,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const catalog = new ModelCatalog(context.extensionUri.fsPath, modelsDirectory);
   const repository = repositoryUrl(context.extension.packageJSON.repository);
   const installer = new ModelInstaller(modelsDirectory, catalog.releaseBaseUrl(repository));
-  const engine = new EngineClient(context.extensionUri.fsPath, context.globalStorageUri.fsPath, logger);
+  const engine = new EngineClient(context.extensionUri.fsPath, context.globalStorageUri.fsPath, logger, catalog);
   await engine.init();
   const sessions = new SessionStore(context.globalStorageUri.fsPath);
   await sessions.init();
@@ -73,7 +77,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // extensão começa em uma sessão vazia.
   sessions.archiveCurrent();
   const approval = new ApprovalService(() => vscode.workspace.getConfiguration('offgrid').get<ApprovalMode>('agentApprovalMode', 'ask'));
-  const tools = new WorkspaceTools(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath, approval, logger);
+  const tools = new WorkspaceTools(
+    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+    approval,
+    logger,
+    () => services?.autonomy ?? 'assisted'
+  );
   const contextManager = new ContextManager();
   const view = new ChatViewProvider(context.extensionUri);
   const preview = new ChangePreviewProvider();
@@ -82,7 +91,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   services = {
     context, output, logger, engine, catalog, installer, sessions, tools, contextManager, view, preview, statusBar,
-    mode: 'chat', diagnosticsPanel: config.get<DiagnosticsPanelMode>('diagnosticsPanel', 'compact'), modelErrors: {}
+    mode: 'chat',
+    autonomy: config.get<AgentAutonomy>('agentAutonomy', 'assisted'),
+    diagnosticsPanel: config.get<DiagnosticsPanelMode>('diagnosticsPanel', 'compact'),
+    modelErrors: {}
   };
 
   context.subscriptions.push(
@@ -170,7 +182,21 @@ async function safeHandleUiEvent(s: Services, event: UiEvent): Promise<void> {
 async function handleUiEvent(s: Services, event: UiEvent): Promise<void> {
   switch (event.type) {
     case 'ready': await refreshUi(s); break;
-    case 'submit': s.mode = event.mode; await submit(s, event.text, event.mode); break;
+    case 'submit':
+      s.mode = event.mode;
+      s.autonomy = event.autonomy;
+      await submit(s, event.text, event.mode);
+      break;
+    case 'setAutonomy':
+      s.mode = event.mode;
+      s.autonomy = event.value;
+      await vscode.workspace.getConfiguration('offgrid').update(
+        'agentAutonomy',
+        event.value,
+        vscode.ConfigurationTarget.Global
+      );
+      await refreshUi(s);
+      break;
     case 'abort': s.controller?.abort(); break;
     case 'selectModel': await loadModelById(s, event.modelId, false); break;
     case 'modelAction': await manageModels(s, event.modelId); break;
@@ -189,10 +215,22 @@ async function handleUiEvent(s: Services, event: UiEvent): Promise<void> {
     case 'openContextItem': await openContextItem(event.value); break;
     case 'openDiff': {
       if (vscode.workspace.getConfiguration('offgrid').get<boolean>('developmentMock', false)) {
-        await s.preview.open({ filePath: event.filePath, originalContent: 'const estado = \'antigo\';\n', proposedContent: 'const estado = \'novo\';\n', existed: true });
+        await s.preview.open({ filePath: event.filePath, originalContent: 'const estado = \'antigo\';\n', proposedContent: 'const estado = \'novo\';\n', existed: true, kind: 'modified' });
       } else {
         await s.preview.open(s.tools.getChange(event.filePath));
       }
+      break;
+    }
+    case 'acceptReviewFile': {
+      const file = await s.tools.acceptChange(event.filePath);
+      s.sessions.addMessage({ role: 'system', text: `Alteração aceita: ${file}` });
+      await refreshUi(s);
+      break;
+    }
+    case 'rejectReviewFile': {
+      const file = s.tools.rejectChange(event.filePath);
+      s.sessions.addMessage({ role: 'system', text: `Alteração descartada: ${file}` });
+      await refreshUi(s);
       break;
     }
     case 'acceptReview': {
@@ -227,25 +265,173 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
       const prompt = await buildChatPrompt(s, text);
       response = await s.engine.prompt(prompt, { signal: controller.signal, onChunk: chunk => void s.view.streamChunk(messageId, chunk) });
     } else {
-      const approvalMode = vscode.workspace.getConfiguration('offgrid').get<ApprovalMode>('agentApprovalMode', 'ask');
-      const schemas = schemasForMode(approvalMode === 'readOnly' ? 'readOnly' : mode);
-      const agentSystem = await buildAgentSystemPrompt(s, schemas, mode, text);
+        s.logger.info(
+          'agent',
+          [
+            '[Flow][0/6] Solicitação do Agente recebida.',
+            `modo=${mode}`,
+            `autonomia=${s.autonomy}`,
+            `texto=${text.length} caracteres`,
+            `workspace=${vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? 'nenhum'}`
+          ].join(' ')
+        );
+      const approvalMode = vscode.workspace
+        .getConfiguration('offgrid')
+        .get<ApprovalMode>('agentApprovalMode', 'ask');
+
+      const schemas = schemasForMode(
+        approvalMode === 'readOnly' ? 'readOnly' : mode
+      );
+
+      s.logger.debug(
+        'agent',
+        `[Flow][1/6] Catálogo preparado. ferramentas=${schemas.length}; aprovação=${approvalMode}.`
+      );
+
+      const contextSize = s.engine.diagnostics.contextSize ?? 4096;
+      const configuredMaxTokens = vscode.workspace
+        .getConfiguration('offgrid')
+        .get<number>('maxTokens', 1024);
+
+      if (contextSize < 2_048) {
+        throw Object.assign(
+          new Error(
+            [
+              `O Modo Agente requer contexto de pelo menos 2048 tokens; o modelo foi carregado com ${contextSize}.`,
+              'Configure offgrid.contextSize como 4096 e recarregue o modelo.'
+            ].join(' ')
+          ),
+          { name: 'AgentContextError' }
+        );
+      }
+
+      // Detecta o tier do modelo antes de montar o system prompt,
+      // pois o tier determina qual variante do prompt será usada.
+      const activeModelStatus = s.activeModelId
+        ? s.catalog.list().find(item => item.id === s.activeModelId)
+        : undefined;
+      const modelFileSizeBytes = activeModelStatus?.fileSize ?? 0;
+      const GB = 1024 ** 3;
+      const modelTier: 'small' | 'medium' | 'large' =
+        modelFileSizeBytes > 3 * GB ? 'large'
+          : modelFileSizeBytes > 1 * GB ? 'medium'
+            : 'small';
+
+      const systemPromptStartedAt = Date.now();
+
+      s.logger.debug(
+        'agent',
+        `[Flow][2/6] Iniciando montagem do prompt de sistema. modelTier=${modelTier}`
+      );
+
+      const agentSystem = await buildAgentSystemPrompt(
+        s,
+        schemas,
+        mode,
+        text,
+        modelTier
+      );
+
+      s.logger.debug(
+        'agent',
+        `[Flow][2/6] Prompt de sistema concluído em ${Date.now() - systemPromptStartedAt} ms; caracteres=${agentSystem.length}.`
+      );
+
+      const taskEnvelope = `<tarefa_usuario>\n${text}\n</tarefa_usuario>`;
+      const budget = calculateAgentContextBudget({
+        contextSize,
+        configuredMaxTokens,
+        systemPromptChars: agentSystem.length,
+        taskChars: taskEnvelope.length,
+        modelFileSizeBytes
+      });
+      const priority = s.contextManager.priority(text);
+      const contextStartedAt = Date.now();
+
+      s.logger.info(
+        'agent',
+        [
+          '[Flow][3/6] Iniciando análise automática do workspace.',
+          `prioridade=${priority.join(' → ') || 'nenhuma'}`,
+          `modelTier=${budget.modelTier}`,
+          `limiteArquivos=${budget.maxFiles}`,
+          `limiteTotal=${budget.workspaceChars}`,
+          `saídaReservada=${budget.maxOutputTokens} tokens`,
+          `margem=${budget.safetyTokens} tokens`
+        ].join(' ')
+      );
+
+      const workspaceContext = await buildAgentWorkspaceContext({
+        workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+        priority,
+        maxFiles: budget.maxFiles,
+        maxCharsPerFile: budget.maxCharsPerFile,
+        maxTotalChars: budget.workspaceChars
+      });
+
+      const contextCharacters = workspaceContext.files.reduce(
+        (total, file) => total + file.content.length,
+        0
+      );
+
+      s.logger.info(
+        'agent',
+        [
+          `[Flow][3/6] Contexto concluído em ${Date.now() - contextStartedAt} ms.`,
+          `arquivos=${workspaceContext.files.length}`,
+          `caracteres=${contextCharacters}`
+        ].join(' ')
+      );
+      const initialPrompt = [
+        workspaceContext.text,
+        taskEnvelope
+      ].filter(Boolean).join('\n\n');
+      s.logger.debug(
+        'agent',
+        [
+          '[Flow][4/6] Prompt inicial concluído.',
+          `caracteres=${initialPrompt.length}`,
+          `arquivosContexto=${workspaceContext.files.length}`
+        ].join(' ')
+      );
+      if (workspaceContext.files.length) {
+        s.logger.debug('agent', `[Context] Arquivos carregados automaticamente: ${workspaceContext.files.map(file => file.filePath).join(', ')}`);
+      }
+      const agentStartedAt = Date.now();
+        s.logger.info(
+          'agent',
+          `[Flow][5/6] Iniciando AgentLoop; máximoEtapas=${vscode.workspace
+            .getConfiguration('offgrid')
+            .get<number>('maxAgentSteps', 10)}.`
+        );
       response = await s.engine.runAgent({
-        initialPrompt: text,
+        initialPrompt,
         systemPrompt: agentSystem,
         maxSteps: vscode.workspace.getConfiguration('offgrid').get<number>('maxAgentSteps', 10),
         diagnosticMode: vscode.workspace.getConfiguration('offgrid').get<boolean>('diagnosticMode', false),
+        maxTokens: budget.maxOutputTokens,
         signal: controller.signal,
         executeTool: call => {
-          if (!schemas.some(schema => schema.name === call.name)) return Promise.resolve({ callId: call.id, name: call.name, ok: false, content: null, error: `Ferramenta indisponível no modo ${mode}.`, durationMs: 0 });
+          const tool = schemas.find(schema => schema.name === call.name);
+          if (!tool) return Promise.resolve({ callId: call.id, name: call.name, ok: false, content: null, error: `Ferramenta indisponível no modo ${mode}.`, durationMs: 0 });
+          const validationError = validateToolArguments(tool, call.arguments);
+          if (validationError) {
+            s.logger.warn('agent', `[Tool] Argumentos rejeitados para ${call.name}: ${validationError}`);
+            return Promise.resolve({ callId: call.id, name: call.name, ok: false, content: null, error: validationError, durationMs: 0 });
+          }
           return s.tools.execute(call);
         }
       });
+      s.logger.info(
+        'agent',
+        [
+          `[Flow][5/6] AgentLoop concluído em ${Date.now() - agentStartedAt} ms.`,
+          `resposta=${response.length} caracteres`,
+          `revisãoPendente=${Boolean(s.tools.pendingReview)}`,
+          `arquivosPropostos=${s.tools.pendingReview?.files.length ?? 0}`
+        ].join(' ')
+      );
       await s.view.streamChunk(messageId, response);
-      if (s.tools.pendingReview && approvalMode === 'full') {
-        const files = await s.tools.acceptChanges();
-        s.sessions.addMessage({ role: 'system', text: `Alterações aplicadas automaticamente com backup: ${files.join(', ')}` });
-      }
     }
     s.sessions.addMessage({ role: 'assistant', text: response });
     s.sessions.updateMetadata({ lastError: undefined, backend: s.engine.diagnostics.backend });
@@ -257,7 +443,9 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
       s.sessions.updateMetadata({ lastError: message });
     }
   } finally {
-    s.controller = undefined; await s.view.streamEnd(messageId); await refreshUi(s);
+    s.controller = undefined;
+    try { await s.view.streamEnd(messageId); } catch { /* webview pode ter sido destruída antes do término */ }
+    await refreshUi(s, false);
   }
 }
 
@@ -343,6 +531,7 @@ async function loadModelById(s: Services, modelId: string, force: boolean): Prom
 
   const previous = s.activeModelId;
   s.activeModelId = modelId;
+  s.pendingLoadModelId = modelId;
   s.modelErrors[modelId] = '';
   await s.context.globalState.update('offgrid.activeModelId', modelId);
   await refreshUi(s, true);
@@ -379,6 +568,7 @@ async function loadModelById(s: Services, modelId: string, force: boolean): Prom
     else if (action === 'Abrir logs') await openOffgridFolder(s, 'logs');
     else if (action === 'Abrir pasta dos modelos') await openOffgridFolder(s, 'models');
   } finally {
+    s.pendingLoadModelId = undefined;
     await refreshUi(s);
   }
 }
@@ -507,7 +697,12 @@ async function refreshUi(s: Services, busy = s.engine.isBusy): Promise<void> {
   // A interface só apresenta um modelo como ativo quando ele está realmente
   // carregado no motor. Isso evita que uma seleção persistida ou um refresh
   // atrasado mantenha o rótulo "ativo" depois de descarregar.
-  if (!mock && engine.engineState === 'unloaded' && s.activeModelId) {
+  // IMPORTANTE: não limpar quando há uma carga em andamento (loading ou isBusy),
+  // pois loadModelById define activeModelId ANTES de iniciar o load — limpar
+  // nesse intervalo apagaria a seleção recém-feita e a combo ficaria vazia
+  // mesmo com o modelo carregado com sucesso.
+  const loadInProgress = engine.loading || s.engine.isBusy || Boolean(s.pendingLoadModelId);
+  if (!mock && engine.engineState === 'unloaded' && s.activeModelId && !loadInProgress) {
     await clearActiveModelSelection(s);
   }
   const hasLoadedModel = engine.loaded && Boolean(engine.modelPath);
@@ -538,7 +733,7 @@ async function refreshUi(s: Services, busy = s.engine.isBusy): Promise<void> {
 
     pendingReview = {
       summary: 'Simulação visual de alteração',
-      files: ['src/exemplo.ts']
+      files: [{ filePath: 'src/exemplo.ts', kind: 'modified' }]
     };
 
     engine = {
@@ -583,6 +778,7 @@ async function refreshUi(s: Services, busy = s.engine.isBusy): Promise<void> {
     models,
     activeModelId,
     mode: s.mode,
+    autonomy: s.autonomy,
     diagnosticsPanel: s.diagnosticsPanel,
     pinnedFile: contextState.pinnedFile,
     autoFile: contextState.autoFile,
@@ -618,6 +814,7 @@ function startMonitoring(s: Services): void {
 async function onConfigurationChanged(s: Services, event: vscode.ConfigurationChangeEvent): Promise<void> {
   if (event.affectsConfiguration('offgrid.logLevel')) s.logger.setLevel(vscode.workspace.getConfiguration('offgrid').get<LogLevel>('logLevel', 'debug'));
   if (event.affectsConfiguration('offgrid.diagnosticsPanel')) s.diagnosticsPanel = vscode.workspace.getConfiguration('offgrid').get<DiagnosticsPanelMode>('diagnosticsPanel', 'compact');
+  if (event.affectsConfiguration('offgrid.agentAutonomy')) s.autonomy = vscode.workspace.getConfiguration('offgrid').get<AgentAutonomy>('agentAutonomy', 'assisted');
   await refreshUi(s);
 }
 
@@ -660,17 +857,139 @@ async function buildChatPrompt(s: Services, text: string): Promise<string> {
   return [temporal, ...snippets, question].filter(Boolean).join('\n\n');
 }
 
-async function buildAgentSystemPrompt(s: Services, schemas: ReturnType<typeof schemasForMode>, mode: ConversationMode, prompt: string): Promise<string> {
-  const base = await readResource(s.context.extensionUri.fsPath, 'resources/agent-system-prompt.md');
+async function buildAgentSystemPrompt(s: Services, schemas: ReturnType<typeof schemasForMode>, mode: ConversationMode, prompt: string, modelTier: 'small' | 'medium' | 'large' = 'large'): Promise<string> {
   const priority = s.contextManager.priority(prompt);
+  const toolSignatures = schemas.map(compactToolSignature);
+
+  // Modelos small (0.5B–1B) recebem prompt ultra-compacto: sem prosa,
+  // só o essencial para o modelo entender o protocolo de ferramentas.
+  // Modelos medium/large recebem o prompt completo com contexto rico.
+  if (modelTier === 'small') {
+    return [
+      'Agente Offgrid. Use ferramentas; não invente caminhos ou conteúdo.',
+      'Ferramenta: responda apenas JSON {"name":"nome","arguments":{...}}; sem Markdown.',
+      'Leia antes de editar. Finalize com apply_changes; nunca grave direto.',
+      ...toolSignatures
+    ].join('\n');
+  }
+
+  const base = await readResource(s.context.extensionUri.fsPath, 'resources/agent-system-prompt.md');
   return [
     base,
     buildTemporalContext(),
-    `Modo atual: ${mode}.`,
+    `Modo=${mode}; autonomia=${s.autonomy}.`,
     `Ordem de contexto: ${priority.join(' → ') || 'nenhum arquivo explícito'}.`,
-    'Ferramentas disponíveis:',
-    ...schemas.map(tool => `- ${tool.name}: ${tool.description}\n  schema=${JSON.stringify(tool.inputSchema)}`)
+    'Para chamar ferramenta, responda somente JSON: {"name":"nome","arguments":{...}}. Sem Markdown ou explicação.',
+    'Leia antes de editar; altere só o necessário; finalize com apply_changes; nunca grave direto.',
+    s.autonomy === 'assisted'
+      ? 'No modo Assistido, criação e exclusão exigem confirmação intermediária.'
+      : 'No modo Autônomo, criação e exclusão continuam sujeitas à revisão final.',
+    'Ferramentas: R=leitura, W=escrita, ?=opcional.',
+    ...toolSignatures
   ].join('\n');
+}
+
+function compactToolSignature(
+  tool: ReturnType<typeof schemasForMode>[number]
+): string {
+  const inputSchema = tool.inputSchema as {
+    properties?: Record<string, unknown>;
+    required?: string[];
+  };
+  const required = new Set(inputSchema.required ?? []);
+  const argumentsText = Object.entries(inputSchema.properties ?? {})
+    .map(([name, definition]) => {
+      const property = definition as { type?: unknown };
+      const type = typeof property.type === 'string'
+        ? property.type.charAt(0)
+        : '?';
+      return `${name}${required.has(name) ? '' : '?'}:${type}`;
+    })
+    .join(',');
+
+  return `${tool.write ? 'W' : 'R'} ${tool.name}(${argumentsText})`;
+}
+
+function calculateAgentContextBudget(params: {
+  contextSize: number;
+  configuredMaxTokens: number;
+  systemPromptChars: number;
+  taskChars: number;
+  modelFileSizeBytes: number;
+}): {
+  maxOutputTokens: number;
+  safetyTokens: number;
+  workspaceChars: number;
+  maxFiles: number;
+  maxCharsPerFile: number;
+  modelTier: 'small' | 'medium' | 'large';
+} {
+  const contextSize = Math.max(256, Math.floor(params.contextSize));
+  const configuredMaxTokens = Math.max(64, Math.floor(params.configuredMaxTokens));
+  const maxOutputTokens = Math.min(
+    configuredMaxTokens,
+    Math.max(96, Math.floor(contextSize * 0.16))
+  );
+  const safetyTokens = Math.max(64, Math.floor(contextSize * 0.06));
+  const availableInputTokens = Math.max(
+    0,
+    contextSize - maxOutputTokens - safetyTokens
+  );
+
+  // Código, caminhos e português costumam consumir mais tokens que prosa
+  // inglesa. Três caracteres por token é uma estimativa conservadora.
+  const availableInputChars = availableInputTokens * 3;
+  const fixedOverheadChars = 384;
+  const workspaceChars = Math.max(
+    128,
+    availableInputChars
+      - params.systemPromptChars
+      - params.taskChars
+      - fixedOverheadChars
+  );
+
+  // Calibração por tamanho do modelo (proxy via fileSize do GGUF Q4):
+  //   small  < 1 GB  → 0.5B–1B  → prefill lento em CPU, contexto mínimo
+  //   medium 1–3 GB  → 3B       → prefill razoável, contexto moderado
+  //   large  > 3 GB  → 7B+      → prefill rápido com GPU, contexto generoso
+  const GB = 1024 ** 3;
+  const modelTier: 'small' | 'medium' | 'large' =
+    params.modelFileSizeBytes > 3 * GB ? 'large'
+      : params.modelFileSizeBytes > 1 * GB ? 'medium'
+        : 'small';
+
+  const tierMaxFiles =
+    modelTier === 'large' ? 8
+      : modelTier === 'medium' ? 4
+        : 1;
+
+  const tierMaxCharsPerFile =
+    modelTier === 'large' ? 6_000
+      : modelTier === 'medium' ? 3_000
+        : 1_500;
+
+  const maxFiles = Math.min(
+    tierMaxFiles,
+    workspaceChars >= 8_000 ? 8
+      : workspaceChars >= 4_000 ? 5
+        : workspaceChars >= 1_800 ? 3
+          : workspaceChars >= 700 ? 2
+            : 1
+  );
+
+  const maxCharsPerFile = Math.max(
+    128,
+    Math.min(tierMaxCharsPerFile, Math.floor(workspaceChars / maxFiles))
+  );
+
+  return {
+    maxOutputTokens,
+    safetyTokens,
+    workspaceChars,
+    maxFiles,
+    maxCharsPerFile,
+    modelTier
+  };
 }
 
 async function copyDiagnostics(s: Services): Promise<void> {

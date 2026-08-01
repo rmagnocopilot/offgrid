@@ -2,6 +2,7 @@ export type Backend = 'auto' | 'cpu' | 'cuda' | 'vulkan' | 'metal';
 export type EffectiveBackend = Exclude<Backend, 'auto'>;
 export type EngineState = 'notStarted' | 'loading' | 'ready' | 'unloading' | 'unloaded' | 'error';
 export type ConversationMode = 'chat' | 'plan' | 'readOnly' | 'agent';
+export type AgentAutonomy = 'assisted' | 'autonomous';
 export type DiagnosticsPanelMode = 'hidden' | 'compact' | 'expanded' | 'onError';
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
 export type ApprovalMode = 'ask' | 'readOnly' | 'full';
@@ -118,11 +119,18 @@ export interface PendingFileChange {
   originalContent: string;
   proposedContent: string;
   existed: boolean;
+  kind: PendingChangeKind;
+}
+
+export type PendingChangeKind = 'modified' | 'created' | 'deleted';
+export interface PendingReviewFile {
+  filePath: string;
+  kind: PendingChangeKind;
 }
 
 export interface PendingReview {
   summary: string;
-  files: string[];
+  files: PendingReviewFile[];
 }
 
 export type ChatRole = 'user' | 'assistant' | 'system' | 'tool';
@@ -185,6 +193,7 @@ export interface UiState {
   models: ModelStatus[];
   activeModelId?: string;
   mode: ConversationMode;
+  autonomy: AgentAutonomy;
   diagnosticsPanel: DiagnosticsPanelMode;
   pinnedFile?: string;
   autoFile?: string;

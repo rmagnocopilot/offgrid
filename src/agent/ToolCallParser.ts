@@ -130,6 +130,29 @@ export function detectToolCall(text: string): ToolCall | null {
   return null;
 }
 
+export function looksLikeToolSchema(text: string): boolean {
+  const raw = stripFence(text);
+  const candidates = [raw, ...balancedCandidates(raw)];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    try {
+      if (isToolSchema(JSON.parse(candidate))) return true;
+    } catch { /* continue */ }
+  }
+  return false;
+}
+
 export function looksLikeToolCall(text: string): boolean {
-  return /"(?:name|tool|functionName|function_call|tool_call)"\s*:|"tool_calls"\s*:|<tool_call/i.test(text);
+  return /"(?:name|tool|functionName|function_call|tool_call)"\s*:|"tool_calls"\s*:|<tool_call/i.test(text)
+    || looksLikeToolSchema(text);
+}
+
+function isToolSchema(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const object = value as Record<string, unknown>;
+  if (object.type !== 'object') return false;
+  if (!object.properties || typeof object.properties !== 'object' || Array.isArray(object.properties)) return false;
+  return Array.isArray(object.required) || Object.prototype.hasOwnProperty.call(object, 'additionalProperties');
 }

@@ -252,7 +252,7 @@ test('catálogo de modelos deriva release models-v1 do repositório', () => {
   const modelIds = catalog.manifest.models.map(model => model.id);
 
   assert.deepEqual(modelIds, [
-    'qwen2.5-coder-1.5b-q4_k_m',
+    'qwen2.5-coder-0.5b-q4_k_m',
     'qwen2.5-coder-3b-q4_k_m',
     'qwen2.5-coder-7b-q4_k_m'
   ]);
@@ -362,11 +362,11 @@ test('chat oculta eventos operacionais do motor e mantém conversa útil', () =>
   assert.match(webview, /previous\?\.role === 'system'/);
 });
 
-test('workflow publica também o modelo 1.5B no release de modelos', () => {
+test('workflow publica também o modelo 0.5B no release de modelos', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/publish-models.yml'), 'utf8');
-  assert.match(workflow, /Baixar, validar e publicar Qwen 1\.5B/);
-  assert.match(workflow, /qwen2\.5-coder-1\.5b-instruct-q4_k_m\.gguf/);
-  assert.match(workflow, /cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046/);
+  assert.match(workflow, /Baixar, validar e publicar Qwen 0\.5B/);
+  assert.match(workflow, /qwen2\.5-coder-0\.5b-instruct-q4_k_m\.gguf/);
+  assert.match(workflow, /1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32/);
 });
 
 test('runtime node-llama-cpp usa import ESM nativo mesmo com saída CommonJS', async () => {

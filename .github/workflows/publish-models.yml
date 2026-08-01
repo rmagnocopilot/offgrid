@@ -45,20 +45,20 @@ jobs:
               --notes "Modelos divididos em partes menores que 2 GB. A extensão remonta e valida o SHA-256 localmente. Consulte docs/MODEL_LICENSES.md antes do uso."
           fi
 
-      - name: Baixar, validar e publicar Qwen 0.5B
+      - name: Baixar, validar e publicar Qwen 1.5B
         shell: bash
         run: |
           set -euo pipefail
-          FILE="qwen2.5-coder-0.5b-instruct-q4_k_m.gguf"
-          URL="https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/${FILE}?download=true"
-          EXPECTED="1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32"
-          mkdir -p work/0.5b
+          FILE="qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
+          URL="https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/${FILE}?download=true"
+          EXPECTED="cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046"
+          mkdir -p work/1.5b
           curl --fail --location --retry 5 --retry-all-errors \
-            --output "work/0.5b/$FILE" "$URL"
-          ACTUAL="$(sha256sum "work/0.5b/$FILE" | awk '{print $1}')"
+            --output "work/1.5b/$FILE" "$URL"
+          ACTUAL="$(sha256sum "work/1.5b/$FILE" | awk '{print $1}')"
           [[ "$ACTUAL" == "$EXPECTED" ]] || { echo "SHA-256 inválido: $ACTUAL"; exit 1; }
-          gh release upload "$RELEASE_TAG" "work/0.5b/$FILE" --clobber
-          rm -rf work/0.5b
+          gh release upload "$RELEASE_TAG" "work/1.5b/$FILE" --clobber
+          rm -rf work/1.5b
 
       - name: Baixar, validar e publicar Qwen 7B
         shell: bash
@@ -101,12 +101,92 @@ jobs:
           gh release upload "$RELEASE_TAG" work/parts/$FILE.part-* --clobber
           rm -rf work
 
+      - name: Baixar e publicar binários llama-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Descobre a versão mais recente do llama.cpp
+          LLAMA_VERSION=$(curl --silent --fail https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          echo "Usando llama.cpp $LLAMA_VERSION"
+          mkdir -p work/bins
+
+          # Windows x64
+          WIN_URL="https://github.com/ggerganov/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-win-avx2-x64.zip"
+          echo "Baixando binário Windows..."
+          curl --fail --location --retry 5 --retry-all-errors --output work/bins/win.zip "$WIN_URL"
+          cd work/bins && unzip -j win.zip "llama-server.exe" -d . && cd ../..
+          mv work/bins/llama-server.exe work/bins/llama-server-win-x64.exe
+          WIN_SHA=$(sha256sum work/bins/llama-server-win-x64.exe | awk '{print $1}')
+          echo "SHA-256 Windows: $WIN_SHA"
+
+          # Linux x64
+          LINUX_URL="https://github.com/ggerganov/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-ubuntu-x64.zip"
+          echo "Baixando binário Linux..."
+          curl --fail --location --retry 5 --retry-all-errors --output work/bins/linux.zip "$LINUX_URL"
+          cd work/bins && unzip -j linux.zip "llama-server" -d . && cd ../..
+          mv work/bins/llama-server work/bins/llama-server-linux-x64
+          chmod +x work/bins/llama-server-linux-x64
+          LINUX_SHA=$(sha256sum work/bins/llama-server-linux-x64 | awk '{print $1}')
+          echo "SHA-256 Linux: $LINUX_SHA"
+
+          # macOS arm64 (Apple Silicon)
+          MACOS_ARM_URL="https://github.com/ggerganov/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-macos-arm64.zip"
+          echo "Baixando binário macOS arm64..."
+          curl --fail --location --retry 5 --retry-all-errors --output work/bins/macos-arm.zip "$MACOS_ARM_URL"
+          cd work/bins && unzip -j macos-arm.zip "llama-server" -d ./macos-arm && cd ../..
+          mv work/bins/macos-arm/llama-server work/bins/llama-server-darwin-arm64
+          chmod +x work/bins/llama-server-darwin-arm64
+          MACOS_ARM_SHA=$(sha256sum work/bins/llama-server-darwin-arm64 | awk '{print $1}')
+          echo "SHA-256 macOS arm64: $MACOS_ARM_SHA"
+
+          # macOS x64 (Intel)
+          MACOS_X64_URL="https://github.com/ggerganov/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-macos-x64.zip"
+          echo "Baixando binário macOS x64..."
+          curl --fail --location --retry 5 --retry-all-errors --output work/bins/macos-x64.zip "$MACOS_X64_URL"
+          cd work/bins && unzip -j macos-x64.zip "llama-server" -d ./macos-x64 && cd ../..
+          mv work/bins/macos-x64/llama-server work/bins/llama-server-darwin-x64
+          chmod +x work/bins/llama-server-darwin-x64
+          MACOS_X64_SHA=$(sha256sum work/bins/llama-server-darwin-x64 | awk '{print $1}')
+          echo "SHA-256 macOS x64: $MACOS_X64_SHA"
+
+          # Publica os binários no release
+          gh release upload "$RELEASE_TAG"             work/bins/llama-server-win-x64.exe             work/bins/llama-server-linux-x64             work/bins/llama-server-darwin-arm64             work/bins/llama-server-darwin-x64             --clobber
+
+          # Atualiza os SHA-256 no manifest.json
+          python3 - <<PYEOF
+import json, re
+
+with open('models/manifest.json', 'r') as f:
+    manifest = json.load(f)
+
+sha_map = {
+    'llama-server-win-x64.exe': '${WIN_SHA}',
+    'llama-server-linux-x64': '${LINUX_SHA}',
+    'llama-server-darwin-arm64': '${MACOS_ARM_SHA}',
+    'llama-server-darwin-x64': '${MACOS_X64_SHA}'
+}
+
+for binary in manifest.get('binaries', []):
+    if binary['fileName'] in sha_map:
+        binary['sha256'] = sha_map[binary['fileName']]
+
+with open('models/manifest.json', 'w') as f:
+    json.dump(manifest, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+
+print('manifest.json atualizado com SHA-256 dos binários.')
+PYEOF
+
+          rm -rf work/bins
+
       - name: Baixar licenças oficiais e publicar manifesto
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-metadata
           curl --fail --location --retry 5 \
+            --output release-metadata/QWEN-1.5B-APACHE-2.0.txt \
+            "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct/resolve/main/LICENSE"          curl --fail --location --retry 5 \
             --output release-metadata/QWEN-7B-APACHE-2.0.txt \
             "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct/resolve/main/LICENSE"
           if [[ "${{ inputs.include_3b }}" == "true" ]]; then

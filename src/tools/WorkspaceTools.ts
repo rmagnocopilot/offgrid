@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
-import type { PendingFileChange, PendingReview, ToolCall, ToolResult } from '../types/contracts';
+import type { AgentAutonomy, PendingFileChange, PendingReview, ToolCall, ToolResult } from '../types/contracts';
 import { normalizeRelativePath, isWriteProtectedPath, resolveInsideRoot, assertNoSymlinkEscape } from '../safety/PathSafety';
 import { ApprovalService } from '../safety/ApprovalService';
 import type { FileLogger } from '../diagnostics/FileLogger';
@@ -24,7 +24,8 @@ export class WorkspaceTools {
   constructor(
     private readonly workspaceRoot: string | undefined,
     private readonly approval: ApprovalService,
-    private readonly logger: FileLogger
+    private readonly logger: FileLogger,
+    private readonly autonomy: () => AgentAutonomy = () => 'assisted'
   ) {
     if (workspaceRoot) {
       this.memoryFile = path.join(workspaceRoot, '.offgrid', 'memory.json');
@@ -33,8 +34,14 @@ export class WorkspaceTools {
   }
 
   get pendingReview(): PendingReview | undefined {
-    if (!this.staged.size || !this.reviewSummary) return undefined;
-    return { summary: this.reviewSummary, files: [...this.staged.keys()] };
+    if (!this.staged.size) return undefined;
+    return {
+      summary: this.reviewSummary || 'Alterações propostas pelo Agente',
+      files: [...this.staged.entries()].map(([filePath, entry]) => ({
+        filePath,
+        kind: entry.delete ? 'deleted' : entry.existed ? 'modified' : 'created'
+      }))
+    };
   }
 
   async execute(call: ToolCall): Promise<ToolResult> {
@@ -56,24 +63,39 @@ export class WorkspaceTools {
     const relative = normalizeRelativePath(filePath);
     const entry = this.staged.get(relative);
     if (!entry) throw new Error(`Alteração não encontrada: ${relative}`);
-    return { filePath: relative, originalContent: entry.original, proposedContent: entry.delete ? '' : entry.content, existed: entry.existed };
+    return {
+      filePath: relative,
+      originalContent: entry.original,
+      proposedContent: entry.delete ? '' : entry.content,
+      existed: entry.existed,
+      kind: entry.delete ? 'deleted' : entry.existed ? 'modified' : 'created'
+    };
   }
 
   async acceptChanges(): Promise<string[]> {
-    this.requireWorkspace();
-    const files: string[] = [];
-    for (const [relative, entry] of this.staged) {
-      if (isWriteProtectedPath(relative)) throw new Error(`Escrita bloqueada: ${relative}`);
-      const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
-      assertNoSymlinkEscape(this.workspaceRoot!, absolute);
-      if (entry.existed) await this.backup(relative, entry.original);
-      if (entry.delete) await fsp.rm(absolute, { force: true });
-      else { await fsp.mkdir(path.dirname(absolute), { recursive: true }); await fsp.writeFile(absolute, entry.content, 'utf8'); }
-      files.push(relative);
-    }
-    this.staged.clear(); this.reviewSummary = '';
+    const files = [...this.staged.keys()];
+    for (const relative of files) await this.acceptChange(relative, false);
     await vscode.commands.executeCommand('workbench.action.files.saveAll');
     return files;
+  }
+
+  async acceptChange(filePath: string, saveAll = true): Promise<string> {
+    this.requireWorkspace();
+    const relative = normalizeRelativePath(filePath);
+    const entry = this.staged.get(relative);
+    if (!entry) throw new Error(`Alteração não encontrada: ${relative}`);
+    await this.writeEntry(relative, entry);
+    this.staged.delete(relative);
+    if (!this.staged.size) this.reviewSummary = '';
+    if (saveAll) await vscode.commands.executeCommand('workbench.action.files.saveAll');
+    return relative;
+  }
+
+  rejectChange(filePath: string): string {
+    const relative = normalizeRelativePath(filePath);
+    if (!this.staged.delete(relative)) throw new Error(`Alteração não encontrada: ${relative}`);
+    if (!this.staged.size) this.reviewSummary = '';
+    return relative;
   }
 
   rejectChanges(): void { this.staged.clear(); this.reviewSummary = ''; }
@@ -97,8 +119,8 @@ export class WorkspaceTools {
       case 'get_memory': return this.getMemory(String(args.query ?? ''));
       case 'save_memory': return this.saveMemory(String(args.title), String(args.content), String(args.type ?? 'decision'));
       case 'apply_edit': return this.applyEdit(args);
-      case 'create_file': return this.stageFile(String(args.filePath), String(args.content ?? ''), false);
-      case 'delete_file': return this.stageDelete(String(args.filePath));
+      case 'create_file': return this.stageFile(String(args.filePath), String(args.content ?? ''), false, String(args.reason ?? ''));
+      case 'delete_file': return this.stageDelete(String(args.filePath), String(args.reason ?? ''));
       case 'run_terminal': return this.runTerminal(String(args.command));
       case 'apply_changes': {
         if (!this.staged.size) throw new Error('Nenhuma alteração foi preparada para revisão.');
@@ -195,34 +217,45 @@ export class WorkspaceTools {
     return { saved: true, title };
   }
   private async applyEdit(args: Record<string, unknown>): Promise<unknown> {
-    const filePath = String(args.filePath), oldText = String(args.oldText), newText = String(args.newText), replaceAll = Boolean(args.replaceAll);
+    const filePath = requiredString(args.filePath, 'filePath');
+    const oldText = requiredString(args.oldText, 'oldText');
+    const newText = requiredString(args.newText, 'newText', true);
+    const replaceAll = Boolean(args.replaceAll);
     const current = await this.currentContent(filePath);
     if (!current.includes(oldText)) throw new Error(`Texto original não encontrado em ${filePath}.`);
     const content = replaceAll ? current.split(oldText).join(newText) : current.replace(oldText, newText);
     return this.stageFile(filePath, content, true);
   }
-  private async stageFile(filePath: string, content: string, existedExpected: boolean): Promise<unknown> {
+  private async stageFile(filePath: string, content: string, existedExpected: boolean, reason = ''): Promise<unknown> {
     this.requireWorkspace();
+    if (!filePath || filePath === 'undefined') throw new Error('Argumento filePath ausente.');
     const relative = normalizeRelativePath(filePath);
     if (isWriteProtectedPath(relative)) throw new Error(`Escrita bloqueada em ${relative}.`);
     const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
     assertNoSymlinkEscape(this.workspaceRoot!, absolute);
-    const existed = fs.existsSync(absolute);
-    if (existedExpected && !existed) throw new Error(`Arquivo não encontrado: ${relative}`);
-    const original = existed ? await fsp.readFile(absolute, 'utf8') : '';
-    const approved = await this.approval.confirmWrite('Preparar alteração', relative);
+    const previous = this.staged.get(relative);
+    const existsOnDisk = fs.existsSync(absolute);
+    if (existedExpected && !existsOnDisk && !previous) throw new Error(`Arquivo não encontrado: ${relative}`);
+    if (!existedExpected && (existsOnDisk || previous)) throw new Error(`O arquivo já existe ou já foi preparado: ${relative}. Use apply_edit para modificá-lo.`);
+    const existed = previous?.existed ?? existsOnDisk;
+    const original = previous?.original ?? (existsOnDisk ? await fsp.readFile(absolute, 'utf8') : '');
+    const approved = previous
+      ? true
+      : existed
+        ? await this.approval.confirmWrite('Preparar alteração', relative)
+        : await this.approval.confirmFileCreation(relative, reason, this.autonomy());
     if (!approved) throw new Error('Alteração rejeitada pelo usuário.');
     this.staged.set(relative, { content, original, existed, delete: false });
-    return { staged: true, filePath: relative };
+    return { staged: true, filePath: relative, kind: existed ? 'modified' : 'created' };
   }
-  private async stageDelete(filePath: string): Promise<unknown> {
+  private async stageDelete(filePath: string, reason: string): Promise<unknown> {
     const relative = normalizeRelativePath(filePath);
     if (isWriteProtectedPath(relative)) throw new Error(`Exclusão bloqueada em ${relative}.`);
     this.requireWorkspace();
     const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
     assertNoSymlinkEscape(this.workspaceRoot!, absolute);
     const original = await this.currentContent(relative);
-    const approved = await this.approval.confirmWrite('Preparar exclusão', relative);
+    const approved = await this.approval.confirmFileDeletion(relative, reason, this.autonomy());
     if (!approved) throw new Error('Exclusão rejeitada pelo usuário.');
     this.staged.set(relative, { content: '', original, existed: true, delete: true });
     return { staged: true, delete: true, filePath: relative };
@@ -248,8 +281,25 @@ export class WorkspaceTools {
     await fsp.mkdir(path.dirname(destination), { recursive: true });
     await fsp.writeFile(destination, content, 'utf8');
   }
+  private async writeEntry(relative: string, entry: StagedEntry): Promise<void> {
+    if (isWriteProtectedPath(relative)) throw new Error(`Escrita bloqueada: ${relative}`);
+    const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
+    assertNoSymlinkEscape(this.workspaceRoot!, absolute);
+    if (entry.existed) await this.backup(relative, entry.original);
+    if (entry.delete) await fsp.rm(absolute, { force: true });
+    else {
+      await fsp.mkdir(path.dirname(absolute), { recursive: true });
+      await fsp.writeFile(absolute, entry.content, 'utf8');
+    }
+  }
   private async loadMemory(): Promise<void> { if (this.memoryFile) try { this.memory = JSON.parse(await fsp.readFile(this.memoryFile, 'utf8')); } catch { this.memory = []; } }
   private requireWorkspace(): void { if (!this.workspaceRoot) throw new Error('Nenhum workspace aberto.'); }
 }
 
 function safeRegex(query: string): RegExp { try { return new RegExp(query, 'i'); } catch { return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); } }
+
+function requiredString(value: unknown, name: string, allowEmpty = false): string {
+  if (typeof value !== 'string') throw new Error(`O argumento ${name} deve ser texto.`);
+  if (!allowEmpty && !value.trim()) throw new Error(`Argumento obrigatório ausente: ${name}.`);
+  return value;
+}

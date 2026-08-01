@@ -2,7 +2,7 @@
   "name": "offgrid",
   "displayName": "Offgrid",
   "description": "Assistente de programação local e offline para VS Code, com Chat, Agente por ferramentas, modelos GGUF e revisão visual.",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "publisher": "rmagnocopilot",
   "license": "MIT",
   "engines": {
@@ -223,7 +223,16 @@
             "full"
           ],
           "default": "ask",
-          "description": "ask revisa antes de salvar; readOnly bloqueia escrita; full aplica com backup."
+          "description": "Compatibilidade de segurança: readOnly bloqueia escrita; ask/full permitem preparar alterações, sempre com revisão final."
+        },
+        "offgrid.agentAutonomy": {
+          "type": "string",
+          "enum": [
+            "assisted",
+            "autonomous"
+          ],
+          "default": "assisted",
+          "description": "Assistido pergunta antes de criar ou excluir arquivos; Autônomo prepara essas mudanças sem pergunta intermediária. Ambos exigem revisão final."
         },
         "offgrid.fallbackToCpu": {
           "type": "boolean",

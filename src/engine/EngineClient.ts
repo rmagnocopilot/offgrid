@@ -8,7 +8,8 @@ import { AgentLoop } from '../agent/AgentLoop';
 import { ResourceMonitor } from '../diagnostics/ResourceMonitor';
 import { chooseLoadAttempts, HardwareProfileStore } from '../diagnostics/HardwareProfile';
 import type { FileLogger } from '../diagnostics/FileLogger';
-import { isDeviceMemoryError } from '../llm/LlamaEngine';
+import { isDeviceMemoryError } from '../llm/LlamaServerEngine';
+import { LlamaServerManager, llamaServerBinaryName } from '../llm/LlamaServerManager';
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -33,13 +34,17 @@ export class EngineClient {
     lastFallback: null, lastUnloadReport: null, lastError: null
   };
 
+  private readonly serverManager: LlamaServerManager;
+
   constructor(
     private readonly extensionPath: string,
     private readonly storagePath: string,
-    private readonly logger: FileLogger
+    private readonly logger: FileLogger,
+    catalog: import('../models/ModelCatalog').ModelCatalog
   ) {
     this.monitor = new ResourceMonitor(extensionPath, logger);
     this.profiles = new HardwareProfileStore(storagePath);
+    this.serverManager = new LlamaServerManager(extensionPath, storagePath, catalog);
   }
 
   async init(): Promise<void> { await this.profiles.init(); }
@@ -116,14 +121,27 @@ export class EngineClient {
     systemPrompt: string;
     maxSteps: number;
     diagnosticMode: boolean;
+    maxTokens?: number;
     signal?: AbortSignal;
     executeTool: (call: ToolCall) => Promise<ToolResult>;
   }): Promise<string> {
     this.busyOperation = 'agent';
     let started = false;
     try {
-      await this.rpc('agentStart', {}, { signal: params.signal });
+      const startStartedAt = Date.now();
+      this.logger.debug(
+        'agent',
+        '[Engine][1/3] Enviando agentStart ao processo do motor.'
+      );
+
+      await this.rpc('agentStart', { systemPrompt: params.systemPrompt }, { signal: params.signal });
       started = true;
+
+      this.logger.debug(
+        'agent',
+        `[Engine][1/3] agentStart concluído em ${Date.now() - startStartedAt} ms.`
+      );
+
       const loop = new AgentLoop();
       const result = await loop.run({
         initialPrompt: params.initialPrompt,
@@ -132,16 +150,91 @@ export class EngineClient {
         signal: params.signal,
         log: (level, message) => this.logger.log(level, 'agent', message),
         executeTool: params.executeTool,
-        invokeStep: (prompt, step) => this.rpc<string>('agentStep', {
-          text: prompt,
-          options: { firstStep: step === 1, systemPrompt: params.systemPrompt }
-        }, { signal: params.signal })
+        invokeStep: async (prompt, step) => {
+          const stepStartedAt = Date.now();
+          this.logger.info(
+            'agent',
+            [
+              `[Engine][2/3] Enviando agentStep ${step}.`,
+              `prompt=${prompt.length} caracteres`,
+              `primeiraEtapa=${step === 1}`,
+              `maxTokens=${params.maxTokens ?? 'configuração do motor'}`
+            ].join(' ')
+          );
+
+          try {
+            const response = await this.rpc<string>('agentStep', {
+              text: prompt,
+              options: {
+                firstStep: step === 1,
+                systemPrompt: params.systemPrompt,
+                maxTokens: params.maxTokens
+              }
+            }, { signal: params.signal });
+
+            this.logger.info(
+              'agent',
+              `[Engine][2/3] agentStep ${step} concluído em ${Date.now() - stepStartedAt} ms; resposta=${response.length} caracteres.`
+            );
+            return response;
+          } catch (error) {
+            const elapsed = Date.now() - stepStartedAt;
+            if ((error as Error)?.name === 'AbortError') {
+              this.logger.info(
+                'agent',
+                `[Engine][2/3] agentStep ${step} cancelado após ${elapsed} ms.`
+              );
+            } else {
+              this.logger.error(
+                'agent',
+                `[Engine][2/3] agentStep ${step} falhou após ${elapsed} ms.`,
+                error
+              );
+            }
+            throw error;
+          }
+        }
       });
       return result.text;
     } finally {
-      if (started) {
-        await this.rpc('agentFinish', {}, { timeoutMs: 15_000 })
-          .catch(error => this.logger.warn('agent', 'Falha ao finalizar Agente.', error));
+      if (started && params.signal?.aborted) {
+        this.logger.warn(
+          'agent',
+          [
+            '[Engine][3/3] Geração cancelada.',
+            'O runtime não confirmou o encerramento;',
+            'reiniciando o processo isolado para evitar bloqueio.'
+          ].join(' ')
+        );
+
+        await this.restart();
+
+        this.logger.info(
+          'agent',
+          '[Engine][3/3] Processo isolado reiniciado após cancelamento.'
+        );
+      } else if (started) {
+        const finishStartedAt = Date.now();
+
+        this.logger.debug(
+          'agent',
+          '[Engine][3/3] Enviando agentFinish ao processo do motor.'
+        );
+
+        await this.rpc('agentFinish', {}, { timeoutMs: 15_000, signal: params.signal })
+          .then(() => {
+            this.logger.debug(
+              'agent',
+              `[Engine][3/3] agentFinish concluído em ${Date.now() - finishStartedAt} ms.`
+            );
+          })
+          .catch(error => {
+            this.logger.warn(
+              'agent',
+              `[Engine][3/3] agentFinish falhou após ${Date.now() - finishStartedAt} ms.`,
+              error
+            );
+          });
       }
       this.busyOperation = undefined;
     }
@@ -241,7 +334,12 @@ export class EngineClient {
     const workerPath = path.join(__dirname, 'EngineWorker.js');
     const worker = fork(workerPath, [], {
       cwd: this.extensionPath,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', OFFGRID_ENGINE_WORKER: '1' },
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
+        OFFGRID_ENGINE_WORKER: '1',
+        OFFGRID_SERVER_BINARY: this.serverManager.binaryPath
+      },
       execPath: process.execPath,
       execArgv: [],
       stdio: ['ignore', 'pipe', 'pipe', 'ipc']
@@ -364,7 +462,60 @@ export class EngineClient {
     const requestId = `r${Date.now()}-${++this.counter}`;
     return new Promise<T>((resolve, reject) => {
       let timer: NodeJS.Timeout | undefined;
-      const abort = (): void => { this.worker?.send({ type: 'cancel', requestId }); };
+      const abort = (): void => {
+        this.logger.info(
+          'agent',
+          [
+            '[Abort][2/4] Sinal recebido pelo EngineClient.',
+            `requestId=${requestId}`,
+            `método=${method}`,
+            `worker=${Boolean(this.worker)}`,
+            `conectado=${Boolean(this.worker?.connected)}`
+          ].join(' ')
+        );
+
+        const pendingRequest = this.pending.get(requestId);
+        if (pendingRequest) {
+          this.pending.delete(requestId);
+          pendingRequest.cleanup();
+          pendingRequest.reject(
+            Object.assign(
+              new Error('Operação cancelada pelo usuário.'),
+              { name: 'AbortError' }
+            )
+          );
+          this.logger.info(
+            'agent',
+            `[Abort][2/4] Requisição local encerrada. requestId=${requestId}.`
+          );
+        }
+
+        try {
+          this.worker?.send(
+            { type: 'cancel', requestId },
+            error => {
+              if (error) {
+                this.logger.error(
+                  'agent',
+                  `[Abort][2/4] Falha ao enviar cancel ao worker. requestId=${requestId}.`,
+                  error
+                );
+                return;
+              }
+              this.logger.info(
+                'agent',
+                `[Abort][2/4] Cancel enviado ao worker. requestId=${requestId}.`
+              );
+            }
+          );
+        } catch (error) {
+          this.logger.error(
+            'agent',
+            `[Abort][2/4] Exceção ao enviar cancel ao worker. requestId=${requestId}.`,
+            error
+          );
+        }
+      };
       const cleanup = (): void => {
         if (timer) clearTimeout(timer);
         options.signal?.removeEventListener('abort', abort);

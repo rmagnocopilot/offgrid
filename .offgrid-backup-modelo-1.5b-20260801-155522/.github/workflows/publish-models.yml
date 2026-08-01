@@ -1,0 +1,118 @@
+name: Publicar modelos no GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_3b:
+        description: "Publicar também o 3B (somente pesquisa/não comercial)"
+        type: boolean
+        required: true
+        default: true
+      research_license_ack:
+        description: "Para publicar o 3B, digite: SOMENTE PESQUISA"
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: models-v1
+      CHUNK_SIZE: 1900M
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validar aceite da licença do 3B
+        if: ${{ inputs.include_3b && inputs.research_license_ack != 'SOMENTE PESQUISA' }}
+        run: |
+          echo "O modelo 3B usa Qwen Research License. Execute novamente e digite SOMENTE PESQUISA no campo de aceite."
+          exit 1
+
+      - name: Criar ou atualizar release
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG já existe; assets serão sobrescritos."
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "Modelos GGUF para Offgrid" \
+              --notes "Modelos divididos em partes menores que 2 GB. A extensão remonta e valida o SHA-256 localmente. Consulte docs/MODEL_LICENSES.md antes do uso."
+          fi
+
+      - name: Baixar, validar e publicar Qwen 0.5B
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="qwen2.5-coder-0.5b-instruct-q4_k_m.gguf"
+          URL="https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/${FILE}?download=true"
+          EXPECTED="1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32"
+          mkdir -p work/0.5b
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "work/0.5b/$FILE" "$URL"
+          ACTUAL="$(sha256sum "work/0.5b/$FILE" | awk '{print $1}')"
+          [[ "$ACTUAL" == "$EXPECTED" ]] || { echo "SHA-256 inválido: $ACTUAL"; exit 1; }
+          gh release upload "$RELEASE_TAG" "work/0.5b/$FILE" --clobber
+          rm -rf work/0.5b
+
+      - name: Baixar, validar e publicar Qwen 7B
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="qwen2.5-coder-7b-instruct-q4_k_m.gguf"
+          URL="https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/${FILE}?download=true"
+          EXPECTED="509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c"
+          mkdir -p work/parts
+          mkfifo work/hash-stream
+          sha256sum < work/hash-stream | awk '{print $1}' > work/digest &
+          HASH_PID=$!
+          curl --fail --location --retry 5 --retry-all-errors "$URL" \
+            | tee work/hash-stream \
+            | split -b "$CHUNK_SIZE" -d -a 2 - "work/parts/$FILE.part-"
+          wait "$HASH_PID"
+          ACTUAL="$(cat work/digest)"
+          [[ "$ACTUAL" == "$EXPECTED" ]] || { echo "SHA-256 inválido: $ACTUAL"; exit 1; }
+          gh release upload "$RELEASE_TAG" work/parts/$FILE.part-* --clobber
+          rm -rf work
+
+      - name: Baixar, validar e publicar Qwen 3B
+        if: ${{ inputs.include_3b }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="qwen2.5-coder-3b-instruct-q4_k_m.gguf"
+          URL="https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/${FILE}?download=true"
+          EXPECTED="724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7"
+          mkdir -p work/parts
+          mkfifo work/hash-stream
+          sha256sum < work/hash-stream | awk '{print $1}' > work/digest &
+          HASH_PID=$!
+          curl --fail --location --retry 5 --retry-all-errors "$URL" \
+            | tee work/hash-stream \
+            | split -b "$CHUNK_SIZE" -d -a 2 - "work/parts/$FILE.part-"
+          wait "$HASH_PID"
+          ACTUAL="$(cat work/digest)"
+          [[ "$ACTUAL" == "$EXPECTED" ]] || { echo "SHA-256 inválido: $ACTUAL"; exit 1; }
+          gh release upload "$RELEASE_TAG" work/parts/$FILE.part-* --clobber
+          rm -rf work
+
+      - name: Baixar licenças oficiais e publicar manifesto
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-metadata
+          curl --fail --location --retry 5 \
+            --output release-metadata/QWEN-7B-APACHE-2.0.txt \
+            "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct/resolve/main/LICENSE"
+          if [[ "${{ inputs.include_3b }}" == "true" ]]; then
+            curl --fail --location --retry 5 \
+              --output release-metadata/QWEN-3B-RESEARCH-LICENSE.txt \
+              "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct/resolve/main/LICENSE"
+          fi
+          cp models/manifest.json docs/MODEL_LICENSES.md release-metadata/
+          gh release upload "$RELEASE_TAG" release-metadata/* --clobber

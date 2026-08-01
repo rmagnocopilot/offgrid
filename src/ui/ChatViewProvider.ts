@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
-import type { ConversationMode, UiState } from '../types/contracts';
+import type { AgentAutonomy, ConversationMode, UiState } from '../types/contracts';
 import { CODICON_SPRITE } from './CodiconSprite';
 
 export type UiEvent =
   | { type: 'ready' }
-  | { type: 'submit'; text: string; mode: ConversationMode }
+  | { type: 'submit'; text: string; mode: ConversationMode; autonomy: AgentAutonomy }
+  | { type: 'setAutonomy'; value: AgentAutonomy; mode: ConversationMode;}
   | { type: 'abort' }
   | { type: 'selectModel'; modelId: string }
   | { type: 'modelAction'; action: string; modelId?: string }
@@ -20,6 +21,8 @@ export type UiEvent =
   | { type: 'clearContext' }
   | { type: 'openContextItem'; value: string }
   | { type: 'openDiff'; filePath: string }
+  | { type: 'acceptReviewFile'; filePath: string }
+  | { type: 'rejectReviewFile'; filePath: string }
   | { type: 'acceptReview' }
   | { type: 'rejectReview' }
   | { type: 'copyDiagnostics' }
@@ -141,6 +144,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         <div id="contextItems"></div>
       </section>
       <section class="messages" id="messages" aria-live="polite"></section>
+      <section class="changes" id="changes" aria-label="Alterações propostas" hidden></section>
       <section class="composer">
         <textarea id="input" placeholder="Pergunte sobre o projeto… Enter envia; Shift+Enter quebra linha" aria-label="Mensagem"></textarea>
         <div class="composer-row">
@@ -150,6 +154,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
             <option value="readOnly">Somente leitura</option>
             <option value="agent">Agente</option>
           </select>
+          <button id="autonomy"
+              class="autonomy-toggle"
+              type="button"
+              aria-label="Modo Assistido"
+              aria-pressed="false"
+              title="M-AS — Modo Assistido: pergunta antes de criar ou excluir arquivos.">
+              M-AS
+          </button>
           <span class="spacer"></span>
           <button id="abort">Parar</button>
           <button class="primary" id="send">Enviar</button>

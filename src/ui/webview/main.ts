@@ -83,11 +83,32 @@ function sessionHtml(session: ChatSession, currentId?: string): string {
   </div>`;
 }
 
+function changeStatus(kind: string): string {
+  return kind === 'created' ? 'A' : kind === 'deleted' ? 'D' : 'M';
+}
+
+function changeLabel(kind: string): string {
+  return kind === 'created' ? 'Arquivo novo' : kind === 'deleted' ? 'Arquivo excluído' : 'Arquivo modificado';
+}
+
 function reviewHtml(current: UiState): string {
   const review = current.pendingReview;
   if (!review) return '';
-  const files = review.files.map(file => `<button class="diff" data-file="${escapeHtml(file)}">Ver diff · ${escapeHtml(file)}</button>`).join('');
-  return `<div class="review"><strong>${escapeHtml(review.summary)}</strong><div class="review-files">${files}</div><button class="primary" id="acceptReview">Aceitar alterações</button> <button class="danger" id="rejectReview">Rejeitar</button></div>`;
+  const files = review.files.map(file => `<div class="change-row">
+    <button class="change-file diff" data-file="${escapeHtml(file.filePath)}" title="Abrir diff de ${escapeHtml(file.filePath)}">
+      <span class="change-status kind-${escapeHtml(file.kind)}" title="${escapeHtml(changeLabel(file.kind))}">${changeStatus(file.kind)}</span>
+      <span class="change-path">${escapeHtml(file.filePath)}</span>
+    </button>
+    <div class="change-actions">
+      <button class="accept-change" data-file="${escapeHtml(file.filePath)}" title="Aceitar somente este arquivo">Aceitar</button>
+      <button class="reject-change danger" data-file="${escapeHtml(file.filePath)}" title="Descartar somente este arquivo">Descartar</button>
+    </div>
+  </div>`).join('');
+  return `<div class="review">
+    <div class="review-head"><strong>Alterações propostas</strong><span>${escapeHtml(review.summary)}</span></div>
+    <div class="review-files">${files}</div>
+    <div class="review-all-actions"><button class="primary" id="acceptReview">Aceitar todas</button><button class="danger" id="rejectReview">Descartar todas</button></div>
+  </div>`;
 }
 
 function isOperationalSystemMessage(text: string): boolean {
@@ -114,8 +135,15 @@ function renderMessages(current: UiState): void {
     .map(message => `<div class="message ${escapeHtml(message.role)}" data-message="${escapeHtml(message.id)}">${escapeHtml(message.text)}</div>`)
     .join('');
   const container = element('messages');
-  container.innerHTML = messages + reviewHtml(current);
+  container.innerHTML = messages;
   container.scrollTop = container.scrollHeight;
+}
+
+function renderChanges(current: UiState): void {
+  const container = element<HTMLElement>('changes');
+  const html = reviewHtml(current);
+  container.innerHTML = html;
+  container.hidden = !html;
 }
 
 function render(): void {
@@ -170,23 +198,38 @@ function render(): void {
   element('contextItems').innerHTML = state.contextItems.map(item => `<button class="chip context-open" data-value="${escapeHtml(item)}">${escapeHtml(item)}</button>`).join(' ');
   renderSessions(state);
   renderMessages(state);
+  renderChanges(state);
   const busy = state.busy;
   const canSubmit = loaded && !busy;
   element('main').classList.toggle('busy', busy);
   element<HTMLTextAreaElement>('input').disabled = busy;
   element<HTMLSelectElement>('mode').disabled = busy;
-  element<HTMLSelectElement>('modelSelect').disabled = busy;
-  const sendButton = element<HTMLButtonElement>('send');
-  sendButton.disabled = !canSubmit;
-  sendButton.title = loaded ? (busy ? 'Aguarde a resposta atual ou use Parar.' : 'Enviar mensagem') : 'Carregue um modelo para enviar mensagens.';
-  element<HTMLButtonElement>('abort').disabled = !busy;
-  element<HTMLButtonElement>('unload').disabled = !loaded || busy;
-  element<HTMLButtonElement>('pinFile').disabled = !state.autoFile || busy;
-  element<HTMLButtonElement>('autoFile').disabled = !state.pinnedFile || busy;
-  element<HTMLButtonElement>('addFile').disabled = !state.autoFile || busy;
-  element<HTMLButtonElement>('addSelection').disabled = busy;
-  element<HTMLButtonElement>('clearContext').disabled = busy || (!state.pinnedFile && state.contextItems.length === 0);
-}
+  const autonomy = element<HTMLButtonElement>('autonomy');
+  const autonomous = state.autonomy === 'autonomous';
+  autonomy.disabled = busy || state.mode !== 'agent';
+  autonomy.textContent = autonomous ? 'M-AT' : 'M-AS';
+  autonomy.setAttribute('aria-pressed', String(autonomous));
+  autonomy.setAttribute(
+    'aria-label',
+    autonomous ? 'Modo Autônomo' : 'Modo Assistido'
+  );
+  autonomy.title = state.mode !== 'agent'
+    ? 'A autonomia é usada somente no Modo Agente.'
+    : autonomous
+      ? 'M-AT — Modo Autônomo: pode criar ou excluir arquivos sem pergunta intermediária.'
+      : 'M-AS — Modo Assistido: pergunta antes de criar ou excluir arquivos.';
+    element<HTMLSelectElement>('modelSelect').disabled = busy;
+    const sendButton = element<HTMLButtonElement>('send');
+    sendButton.disabled = !canSubmit;
+    sendButton.title = loaded ? (busy ? 'Aguarde a resposta atual ou use Parar.' : 'Enviar mensagem') : 'Carregue um modelo para enviar mensagens.';
+    element<HTMLButtonElement>('abort').disabled = !busy;
+    element<HTMLButtonElement>('unload').disabled = !loaded || busy;
+    element<HTMLButtonElement>('pinFile').disabled = !state.autoFile || busy;
+    element<HTMLButtonElement>('autoFile').disabled = !state.pinnedFile || busy;
+    element<HTMLButtonElement>('addFile').disabled = !state.autoFile || busy;
+    element<HTMLButtonElement>('addSelection').disabled = busy;
+    element<HTMLButtonElement>('clearContext').disabled = busy || (!state.pinnedFile && state.contextItems.length === 0);
+  }
 
 window.addEventListener('message', event => {
   const message = event.data as { type?: string; state?: UiState; messageId?: string; chunk?: string };
@@ -218,7 +261,11 @@ function submit(): void {
   const input = element<HTMLTextAreaElement>('input');
   const text = input.value.trim();
   if (!text) return;
-  post('submit', { text, mode: element<HTMLSelectElement>('mode').value });
+  post('submit', {
+    text,
+    mode: element<HTMLSelectElement>('mode').value,
+    autonomy: state.autonomy
+  });
   input.value = '';
 }
 
@@ -230,6 +277,24 @@ element<HTMLTextAreaElement>('input').addEventListener('keydown', event => {
   }
 });
 element('abort').addEventListener('click', () => post('abort'));
+element<HTMLSelectElement>('mode').addEventListener('change', event => {
+  if (!state) return;
+  state.mode = (event.target as HTMLSelectElement).value as UiState['mode'];
+  render();
+});
+element<HTMLButtonElement>('autonomy').addEventListener('click', () => {
+  if (!state || state.mode !== 'agent' || state.busy) return;
+
+  const value: UiState['autonomy'] =
+    state.autonomy === 'assisted' ? 'autonomous' : 'assisted';
+
+  state.autonomy = value;
+  post('setAutonomy', {
+    value,
+    mode: state.mode
+  });
+  render();
+});
 element<HTMLSelectElement>('modelSelect').addEventListener('change', event => {
   const modelId = (event.target as HTMLSelectElement).value;
   if (modelId) post('selectModel', { modelId });
@@ -266,6 +331,16 @@ document.addEventListener('click', event => {
   const diff = target?.closest<HTMLElement>('.diff');
   if (diff) {
     post('openDiff', { filePath: diff.dataset.file });
+    return;
+  }
+  const acceptFile = target?.closest<HTMLElement>('.accept-change');
+  if (acceptFile) {
+    post('acceptReviewFile', { filePath: acceptFile.dataset.file });
+    return;
+  }
+  const rejectFile = target?.closest<HTMLElement>('.reject-change');
+  if (rejectFile) {
+    post('rejectReviewFile', { filePath: rejectFile.dataset.file });
     return;
   }
   const context = target?.closest<HTMLElement>('.context-open');

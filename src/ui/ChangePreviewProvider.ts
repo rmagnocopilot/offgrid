@@ -12,12 +12,20 @@ export class ChangePreviewProvider implements vscode.TextDocumentContentProvider
   provideTextDocumentContent(uri: vscode.Uri): string { return this.contents.get(uri.toString()) ?? ''; }
 
   async open(change: PendingFileChange): Promise<void> {
-    const key = encodeURIComponent(change.filePath);
-    const original = vscode.Uri.parse(`${this.scheme}:original/${key}?t=${Date.now()}`);
-    const proposed = vscode.Uri.parse(`${this.scheme}:proposed/${key}?t=${Date.now()}`);
+    const timestamp = String(Date.now());
+    const normalized = change.filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+    const original = vscode.Uri.from({ scheme: this.scheme, path: `/original/${normalized}`, query: `t=${timestamp}` });
+    const proposed = vscode.Uri.from({ scheme: this.scheme, path: `/proposed/${normalized}`, query: `t=${timestamp}` });
     this.contents.set(original.toString(), change.originalContent);
     this.contents.set(proposed.toString(), change.proposedContent);
-    await vscode.commands.executeCommand('vscode.diff', original, proposed, `Offgrid: ${change.filePath} — original ↔ proposta`, { preview: true });
+    const label = change.kind === 'created' ? 'novo arquivo' : change.kind === 'deleted' ? 'exclusão' : 'alteração';
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      original,
+      proposed,
+      `Offgrid: ${change.filePath} — ${label}`,
+      { preview: true }
+    );
   }
   dispose(): void { this.registration.dispose(); this.emitter.dispose(); this.contents.clear(); }
 }

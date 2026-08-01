@@ -16,9 +16,9 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   schema('git_diff', 'Retorna git diff, opcionalmente de um arquivo.', { filePath: stringProp() }, false),
   schema('get_memory', 'Pesquisa decisões e padrões salvos na memória do projeto.', { query: stringProp() }, false),
   schema('save_memory', 'Salva uma decisão ou padrão na memória do projeto.', { title: stringProp(), content: stringProp(), type: stringProp() }, true, ['title','content']),
-  schema('apply_edit', 'Prepara substituição exata em arquivo; não salva antes da revisão.', { filePath: stringProp(), oldText: stringProp(), newText: stringProp(), replaceAll: boolProp() }, true, ['filePath','oldText','newText']),
-  schema('create_file', 'Prepara um novo arquivo para revisão.', { filePath: stringProp(), content: stringProp() }, true, ['filePath','content']),
-  schema('delete_file', 'Prepara exclusão de arquivo para revisão.', { filePath: stringProp() }, true, ['filePath']),
+  schema('apply_edit', 'Prepara substituição exata em arquivo existente; não salva antes da revisão.', { filePath: stringProp(), oldText: stringProp(), newText: stringProp(), replaceAll: boolProp() }, true, ['filePath','oldText','newText']),
+  schema('create_file', 'Prepara um novo arquivo para revisão.', { filePath: stringProp(), content: stringProp(), reason: stringProp('Motivo técnico para criar o arquivo') }, true, ['filePath','content']),
+  schema('delete_file', 'Prepara exclusão de arquivo para revisão.', { filePath: stringProp(), reason: stringProp('Motivo técnico para excluir o arquivo') }, true, ['filePath']),
   schema('run_terminal', 'Executa comando no terminal após confirmação explícita.', { command: stringProp() }, true, ['command']),
   schema('apply_changes', 'Finaliza alterações preparadas e abre revisão.', { summary: stringProp() }, true, ['summary'])
 ];
@@ -27,6 +27,32 @@ export function schemasForMode(mode: ConversationMode): ToolSchema[] {
   if (mode === 'chat') return [];
   if (mode === 'plan' || mode === 'readOnly') return TOOL_SCHEMAS.filter(item => !item.write);
   return TOOL_SCHEMAS;
+}
+
+export function validateToolArguments(tool: ToolSchema, args: Record<string, unknown>): string | undefined {
+  const schemaValue = tool.inputSchema as {
+    properties?: Record<string, { type?: string }>;
+    required?: string[];
+    additionalProperties?: boolean;
+  };
+  const properties = schemaValue.properties ?? {};
+  for (const required of schemaValue.required ?? []) {
+    if (!(required in args) || args[required] === undefined || args[required] === null) {
+      return `Argumento obrigatório ausente: ${required}.`;
+    }
+  }
+  if (schemaValue.additionalProperties === false) {
+    const unexpected = Object.keys(args).find(key => !(key in properties));
+    if (unexpected) return `Argumento não reconhecido: ${unexpected}.`;
+  }
+  for (const [name, value] of Object.entries(args)) {
+    const expected = properties[name]?.type;
+    if (!expected || value === undefined || value === null) continue;
+    if (expected === 'number' && (typeof value !== 'number' || !Number.isFinite(value))) return `O argumento ${name} deve ser number.`;
+    if (expected === 'string' && typeof value !== 'string') return `O argumento ${name} deve ser string.`;
+    if (expected === 'boolean' && typeof value !== 'boolean') return `O argumento ${name} deve ser boolean.`;
+  }
+  return undefined;
 }
 
 function schema(name: string, description: string, properties: Record<string, unknown>, write: boolean, required: string[] = []): ToolSchema {
