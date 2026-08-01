@@ -105,55 +105,70 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Descobre a versão mais recente do llama.cpp (usa o token do GitHub para evitar rate limit)
-          LLAMA_VERSION=$(curl --silent --fail             -H "Authorization: Bearer $GH_TOKEN"             -H "Accept: application/vnd.github+json"             https://api.github.com/repos/ggerganov/llama.cpp/releases/latest             | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
-          echo "Usando llama.cpp $LLAMA_VERSION"
-          mkdir -p work/bins
+          # Versão do llama.cpp — atualize em: https://github.com/ggml-org/llama.cpp/releases
+          LLAMA_VERSION="b5614"
+          BASE="https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_VERSION}"
+          echo "Usando llama.cpp ${LLAMA_VERSION}"
+          mkdir -p work/bins work/bins/linux work/bins/macos-arm work/bins/macos-x64
 
-          # Windows x64
-          WIN_URL="https://github.com/ggerganov/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-win-avx2-x64.zip"
+          # Windows x64 (AVX2)
           echo "Baixando binário Windows..."
-          curl --fail --location --retry 5 --retry-all-errors --output work/bins/win.zip "$WIN_URL"
-          cd work/bins && unzip -j win.zip "llama-server.exe" -d . && cd ../..
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output work/bins/win.zip \
+            "${BASE}/llama-${LLAMA_VERSION}-bin-win-avx2-x64.zip"
+          unzip -j work/bins/win.zip "llama-server.exe" -d work/bins/ 2>/dev/null || \
+            unzip -j work/bins/win.zip "*/llama-server.exe" -d work/bins/
           mv work/bins/llama-server.exe work/bins/llama-server-win-x64.exe
           WIN_SHA=$(sha256sum work/bins/llama-server-win-x64.exe | awk '{print $1}')
-          echo "SHA-256 Windows: $WIN_SHA"
+          echo "SHA-256 Windows: ${WIN_SHA}"
 
           # Linux x64
-          LINUX_URL="https://github.com/ggerganov/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-ubuntu-x64.zip"
           echo "Baixando binário Linux..."
-          curl --fail --location --retry 5 --retry-all-errors --output work/bins/linux.zip "$LINUX_URL"
-          cd work/bins && unzip -j linux.zip "llama-server" -d . && cd ../..
-          mv work/bins/llama-server work/bins/llama-server-linux-x64
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output work/bins/linux.zip \
+            "${BASE}/llama-${LLAMA_VERSION}-bin-linux-x64.zip"
+          unzip -j work/bins/linux.zip "llama-server" -d work/bins/linux/ 2>/dev/null || \
+            unzip -j work/bins/linux.zip "*/llama-server" -d work/bins/linux/
+          mv work/bins/linux/llama-server work/bins/llama-server-linux-x64
           chmod +x work/bins/llama-server-linux-x64
           LINUX_SHA=$(sha256sum work/bins/llama-server-linux-x64 | awk '{print $1}')
-          echo "SHA-256 Linux: $LINUX_SHA"
+          echo "SHA-256 Linux: ${LINUX_SHA}"
 
           # macOS arm64 (Apple Silicon)
-          MACOS_ARM_URL="https://github.com/ggerganov/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-macos-arm64.zip"
           echo "Baixando binário macOS arm64..."
-          curl --fail --location --retry 5 --retry-all-errors --output work/bins/macos-arm.zip "$MACOS_ARM_URL"
-          cd work/bins && unzip -j macos-arm.zip "llama-server" -d ./macos-arm && cd ../..
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output work/bins/macos-arm.zip \
+            "${BASE}/llama-${LLAMA_VERSION}-bin-macos-arm64.zip"
+          unzip -j work/bins/macos-arm.zip "llama-server" -d work/bins/macos-arm/ 2>/dev/null || \
+            unzip -j work/bins/macos-arm.zip "*/llama-server" -d work/bins/macos-arm/
           mv work/bins/macos-arm/llama-server work/bins/llama-server-darwin-arm64
           chmod +x work/bins/llama-server-darwin-arm64
           MACOS_ARM_SHA=$(sha256sum work/bins/llama-server-darwin-arm64 | awk '{print $1}')
-          echo "SHA-256 macOS arm64: $MACOS_ARM_SHA"
+          echo "SHA-256 macOS arm64: ${MACOS_ARM_SHA}"
 
           # macOS x64 (Intel)
-          MACOS_X64_URL="https://github.com/ggerganov/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-macos-x64.zip"
           echo "Baixando binário macOS x64..."
-          curl --fail --location --retry 5 --retry-all-errors --output work/bins/macos-x64.zip "$MACOS_X64_URL"
-          cd work/bins && unzip -j macos-x64.zip "llama-server" -d ./macos-x64 && cd ../..
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output work/bins/macos-x64.zip \
+            "${BASE}/llama-${LLAMA_VERSION}-bin-macos-x64.zip"
+          unzip -j work/bins/macos-x64.zip "llama-server" -d work/bins/macos-x64/ 2>/dev/null || \
+            unzip -j work/bins/macos-x64.zip "*/llama-server" -d work/bins/macos-x64/
           mv work/bins/macos-x64/llama-server work/bins/llama-server-darwin-x64
           chmod +x work/bins/llama-server-darwin-x64
           MACOS_X64_SHA=$(sha256sum work/bins/llama-server-darwin-x64 | awk '{print $1}')
-          echo "SHA-256 macOS x64: $MACOS_X64_SHA"
+          echo "SHA-256 macOS x64: ${MACOS_X64_SHA}"
 
-          # Publica os binários no release
-          gh release upload "$RELEASE_TAG"             work/bins/llama-server-win-x64.exe             work/bins/llama-server-linux-x64             work/bins/llama-server-darwin-arm64             work/bins/llama-server-darwin-x64             --clobber
+          # Publica no release
+          gh release upload "$RELEASE_TAG" \
+            work/bins/llama-server-win-x64.exe \
+            work/bins/llama-server-linux-x64 \
+            work/bins/llama-server-darwin-arm64 \
+            work/bins/llama-server-darwin-x64 \
+            --clobber
 
-          # Atualiza os SHA-256 no manifest.json via script externo
-          python3 scripts/update-binary-sha.py "$WIN_SHA" "$LINUX_SHA" "$MACOS_ARM_SHA" "$MACOS_X64_SHA" 
+          # Atualiza SHA-256 no manifest.json
+          python3 scripts/update-binary-sha.py \
+            "${WIN_SHA}" "${LINUX_SHA}" "${MACOS_ARM_SHA}" "${MACOS_X64_SHA}"
 
           rm -rf work/bins
 
