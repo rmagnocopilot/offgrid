@@ -55,7 +55,7 @@
   "binaries": [
     {
       "fileName": "llama-server-win-x64.zip",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "4d75b0dc52f42cdfdb547ef858662620e843bdf43d65e14ba233a6e20c103b52",
       "description": "Servidor de inferência llama.cpp para Windows x64 (inclui DLLs necessárias). Requerido pelo modo Agente do Offgrid."
     },
     {
