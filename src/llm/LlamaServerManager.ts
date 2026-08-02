@@ -49,8 +49,9 @@ export function llamaServerExecutablePath(binariesDir: string): string {
   const path = require('node:path');
 
   if (platform === 'win32' && arch === 'x64') {
-    // Windows: extraído em subpasta, exe dentro dela
-    return path.join(binariesDir, 'llama-server-win-x64', 'llama-server.exe');
+    // Windows: Expand-Archive cria uma subpasta extra com o nome do zip.
+    // Estrutura real: binaries/llama-server-win-x64/llama-server-win-x64/llama-server.exe
+    return path.join(binariesDir, 'llama-server-win-x64', 'llama-server-win-x64', 'llama-server.exe');
   }
   if (platform === 'linux' && arch === 'x64') return path.join(binariesDir, 'llama-server-linux-x64');
   if (platform === 'darwin' && arch === 'arm64') return path.join(binariesDir, 'llama-server-darwin-arm64');
