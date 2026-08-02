@@ -9,7 +9,7 @@ import { ResourceMonitor } from '../diagnostics/ResourceMonitor';
 import { chooseLoadAttempts, HardwareProfileStore } from '../diagnostics/HardwareProfile';
 import type { FileLogger } from '../diagnostics/FileLogger';
 import { isDeviceMemoryError } from '../llm/LlamaServerEngine';
-import { LlamaServerManager, llamaServerBinaryName } from '../llm/LlamaServerManager';
+import { LlamaServerManager, llamaServerExecutablePath } from '../llm/LlamaServerManager';
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -349,7 +349,9 @@ export class EngineClient {
         ...process.env,
         ELECTRON_RUN_AS_NODE: '1',
         OFFGRID_ENGINE_WORKER: '1',
-        OFFGRID_SERVER_BINARY: this.serverManager.binaryPath
+        OFFGRID_SERVER_BINARY: llamaServerExecutablePath(
+          require('node:path').join(this.storagePath, 'binaries')
+        )
       },
       execPath: process.execPath,
       execArgv: [],

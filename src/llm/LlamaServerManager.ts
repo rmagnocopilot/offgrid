@@ -26,11 +26,12 @@ import type { ModelCatalog } from '../models/ModelCatalog';
 export interface BinaryProgress { message: string; increment?: number }
 
 /** Retorna o nome do arquivo do binário para a plataforma atual. */
-export function llamaServerBinaryName(): string {
+/** Nome do arquivo do binário no release (o que é baixado). */
+export function llamaServerPackageName(): string {
   const platform = process.platform;
   const arch = process.arch;
 
-  if (platform === 'win32' && arch === 'x64') return 'llama-server-win-x64.exe';
+  if (platform === 'win32' && arch === 'x64') return 'llama-server-win-x64.zip';
   if (platform === 'linux' && arch === 'x64') return 'llama-server-linux-x64';
   if (platform === 'darwin' && arch === 'arm64') return 'llama-server-darwin-arm64';
   if (platform === 'darwin' && arch === 'x64') return 'llama-server-darwin-x64';
@@ -40,6 +41,26 @@ export function llamaServerBinaryName(): string {
     'Suporte disponível: Windows x64, Linux x64, macOS (x64 e Apple Silicon).'
   );
 }
+
+/** Caminho do executável llama-server após instalação. */
+export function llamaServerExecutablePath(binariesDir: string): string {
+  const platform = process.platform;
+  const arch = process.arch;
+  const path = require('node:path');
+
+  if (platform === 'win32' && arch === 'x64') {
+    // Windows: extraído em subpasta, exe dentro dela
+    return path.join(binariesDir, 'llama-server-win-x64', 'llama-server.exe');
+  }
+  if (platform === 'linux' && arch === 'x64') return path.join(binariesDir, 'llama-server-linux-x64');
+  if (platform === 'darwin' && arch === 'arm64') return path.join(binariesDir, 'llama-server-darwin-arm64');
+  if (platform === 'darwin' && arch === 'x64') return path.join(binariesDir, 'llama-server-darwin-x64');
+
+  throw new Error(`Plataforma não suportada: ${platform}/${arch}`);
+}
+
+/** @deprecated use llamaServerPackageName */
+export function llamaServerBinaryName(): string { return llamaServerPackageName(); }
 
 export class LlamaServerManager {
   private readonly binariesDirectory: string;
@@ -72,26 +93,22 @@ export class LlamaServerManager {
   ): Promise<string> {
     await fsp.mkdir(this.binariesDirectory, { recursive: true });
 
-    const binaryFile = llamaServerBinaryName();
-    const binaryDef = this.catalog.getBinary(binaryFile);
-    const target = this.binaryPath;
+    const packageFile = llamaServerPackageName();
+    const binaryDef = this.catalog.getBinary(packageFile);
+    const executablePath = llamaServerExecutablePath(this.binariesDirectory);
 
     // Já instalado e íntegro?
-    if (fs.existsSync(target)) {
-      const hash = await sha256(target);
-      if (hash.toLowerCase() === binaryDef.sha256.toLowerCase()) {
-        onProgress({ message: 'llama-server já instalado.' });
-        return target;
-      }
-      onProgress({ message: 'SHA-256 do binário diverge; baixando novamente...' });
+    if (fs.existsSync(executablePath)) {
+      onProgress({ message: 'llama-server já instalado.' });
+      return executablePath;
     }
 
-    // Baixar
+    // Baixar o pacote
     const baseUrl = this.catalog.releaseBaseUrl(repositoryUrl);
-    const url = `${baseUrl}/${encodeURIComponent(binaryFile)}`;
-    const partial = `${target}.partial`;
+    const url = `${baseUrl}/${encodeURIComponent(packageFile)}`;
+    const partial = path.join(this.binariesDirectory, `${packageFile}.partial`);
 
-    onProgress({ message: `Baixando ${binaryFile}...` });
+    onProgress({ message: `Baixando ${packageFile}...` });
 
     try {
       await download(url, partial, (percent) => {
@@ -103,20 +120,33 @@ export class LlamaServerManager {
       const hash = await sha256(partial);
       if (hash.toLowerCase() !== binaryDef.sha256.toLowerCase()) {
         throw new Error(
-          `SHA-256 inválido para ${binaryFile}. Esperado: ${binaryDef.sha256}; recebido: ${hash}`
+          `SHA-256 inválido para ${packageFile}. Esperado: ${binaryDef.sha256}; recebido: ${hash}`
         );
       }
 
-      await fsp.rm(target, { force: true });
-      await fsp.rename(partial, target);
-
-      // Tornar executável em sistemas Unix
-      if (process.platform !== 'win32') {
+      // Instala: extrai zip (Windows) ou move binário diretamente (Unix)
+      if (packageFile.endsWith('.zip')) {
+        onProgress({ message: 'Extraindo llama-server...' });
+        const { execFile } = await import('node:child_process');
+        const { promisify } = await import('node:util');
+        const execFileAsync = promisify(execFile);
+        const extractDir = path.join(this.binariesDirectory, path.basename(packageFile, '.zip'));
+        await fsp.mkdir(extractDir, { recursive: true });
+        // Usa o unzip nativo do PowerShell no Windows
+        await execFileAsync('powershell.exe', [
+          '-NoProfile', '-Command',
+          `Expand-Archive -Path "${partial}" -DestinationPath "${extractDir}" -Force`
+        ]);
+        await fsp.rm(partial, { force: true });
+      } else {
+        const target = executablePath;
+        await fsp.rm(target, { force: true });
+        await fsp.rename(partial, target);
         await fsp.chmod(target, 0o755);
       }
 
       onProgress({ message: 'llama-server instalado com sucesso.' });
-      return target;
+      return executablePath;
     } catch (error) {
       await fsp.rm(partial, { force: true }).catch(() => undefined);
       throw error;

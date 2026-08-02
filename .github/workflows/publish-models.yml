@@ -111,16 +111,16 @@ jobs:
           echo "Usando llama.cpp ${LLAMA_VERSION}"
           mkdir -p work/bins
 
-          # Windows x64 (CPU)
+          # Windows x64 (CPU) — extrai todos os arquivos (exe + DLLs) e reempacota como zip
           echo "Baixando binário Windows..."
           curl --fail --location --retry 5 --retry-all-errors \
-            --output work/bins/win.zip \
+            --output work/bins/win-src.zip \
             "${BASE}/llama-${LLAMA_VERSION}-bin-win-cpu-x64.zip"
-          unzip -j work/bins/win.zip "llama-server.exe" -d work/bins/ 2>/dev/null || \
-            unzip -j work/bins/win.zip "*/llama-server.exe" -d work/bins/
-          mv work/bins/llama-server.exe work/bins/llama-server-win-x64.exe
-          WIN_SHA=$(sha256sum work/bins/llama-server-win-x64.exe | awk '{print $1}')
-          echo "SHA-256 Windows: ${WIN_SHA}"
+          mkdir -p work/bins/llama-server-win-x64
+          unzip -j work/bins/win-src.zip -d work/bins/llama-server-win-x64/
+          cd work/bins && zip -r llama-server-win-x64.zip llama-server-win-x64/ && cd ../..
+          WIN_SHA=$(sha256sum work/bins/llama-server-win-x64.zip | awk '{print $1}')
+          echo "SHA-256 Windows zip: ${WIN_SHA}" 
 
           # Linux x64 (tar.gz)
           echo "Baixando binário Linux..."
@@ -163,7 +163,7 @@ jobs:
 
           # Publica no release
           gh release upload "$RELEASE_TAG" \
-            work/bins/llama-server-win-x64.exe \
+            work/bins/llama-server-win-x64.zip \
             work/bins/llama-server-linux-x64 \
             work/bins/llama-server-darwin-arm64 \
             work/bins/llama-server-darwin-x64 \
