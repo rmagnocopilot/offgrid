@@ -56,6 +56,17 @@ export class EngineClient {
     this.busyOperation = 'load';
     this.state = { ...this.state, loading: true, engineState: 'loading', lastError: null };
     try {
+      // Garante que o binário llama-server está instalado antes de tentar carregar.
+      // Se não estiver, baixa do release do GitHub automaticamente.
+      if (!this.serverManager.isInstalled()) {
+        this.logger.info('model', '[Load] Binário llama-server não encontrado. Iniciando download...');
+        const repoUrl = 'https://github.com/rmagnocopilot/offgrid';
+        await this.serverManager.ensureInstalled(repoUrl, (progress) => {
+          this.logger.info('model', `[Load][Binário] ${progress.message}`);
+        });
+        this.logger.info('model', '[Load] Binário llama-server instalado com sucesso.');
+      }
+
       const before = await this.refreshResources(true, true);
       this.logResources('antes de carregar', before);
       const saved = this.profiles.get(options.modelPath);
