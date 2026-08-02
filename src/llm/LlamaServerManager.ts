@@ -132,12 +132,17 @@ export class LlamaServerManager {
         const execFileAsync = promisify(execFile);
         const extractDir = path.join(this.binariesDirectory, path.basename(packageFile, '.zip'));
         await fsp.mkdir(extractDir, { recursive: true });
-        // Usa o unzip nativo do PowerShell no Windows
-        await execFileAsync('powershell.exe', [
-          '-NoProfile', '-Command',
-          `Expand-Archive -Path "${partial}" -DestinationPath "${extractDir}" -Force`
-        ]);
-        await fsp.rm(partial, { force: true });
+        // Renomeia .partial → .zip antes de extrair (Expand-Archive exige extensão .zip)
+        const partialAsZip = partial.replace(/\.partial$/, '');
+        await fsp.rename(partial, partialAsZip);
+        try {
+          await execFileAsync('powershell.exe', [
+            '-NoProfile', '-Command',
+            `Expand-Archive -Path "${partialAsZip}" -DestinationPath "${extractDir}" -Force`
+          ]);
+        } finally {
+          await fsp.rm(partialAsZip, { force: true }).catch(() => undefined);
+        }
       } else {
         const target = executablePath;
         await fsp.rm(target, { force: true });
