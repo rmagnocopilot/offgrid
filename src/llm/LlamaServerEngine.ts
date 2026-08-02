@@ -168,10 +168,19 @@ export class LlamaServerEngine {
           this.log(level, `[llama-server][stderr] ${line}`);
         }
       });
+      let stderrBuffer = '';
+      this.serverProcess.stderr?.on('data', (chunk: Buffer) => {
+        stderrBuffer += chunk.toString();
+      });
+
       this.serverProcess.on('exit', (code, signal) => {
         this.log('debug', `[llama-server] Processo encerrado. code=${code} signal=${signal}`);
+        if (code !== 0 && code !== null && !this.serverReady) {
+          // Log das últimas linhas do stderr para diagnóstico
+          const lastLines = stderrBuffer.split('\n').filter(Boolean).slice(-10).join('\n');
+          if (lastLines) this.log('warn', `[llama-server][stderr-final] ${lastLines}`);
+        }
         if (this.serverReady) {
-          // Encerramento inesperado após estar pronto
           this.serverReady = false;
           this.state = 'error';
           this.lastError = `llama-server encerrou inesperadamente: code=${code} signal=${signal}`;
@@ -205,8 +214,6 @@ export class LlamaServerEngine {
       '--n-predict', String(options.maxTokens),
       '--threads', String(Math.max(1, require('os').cpus().length - 1)),
       '--no-mmap',       // evita mmap para não competir com RAM do sistema
-      '--flash-attn',    // Flash Attention quando disponível
-      '--log-disable',   // silencia logs internos do servidor no stderr principal
     ];
 
     // GPU
