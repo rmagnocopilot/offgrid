@@ -279,7 +279,11 @@ element<HTMLTextAreaElement>('input').addEventListener('keydown', event => {
 element('abort').addEventListener('click', () => post('abort'));
 element<HTMLSelectElement>('mode').addEventListener('change', event => {
   if (!state) return;
-  state.mode = (event.target as HTMLSelectElement).value as UiState['mode'];
+  const newMode = (event.target as HTMLSelectElement).value as UiState['mode'];
+  state.mode = newMode;
+  // Notifica o extension host imediatamente para que s.mode seja persistido
+  // e não sobrescrito pelo próximo refreshUi antes do próximo submit.
+  post('setMode', { mode: newMode });
   render();
 });
 element<HTMLButtonElement>('autonomy').addEventListener('click', () => {

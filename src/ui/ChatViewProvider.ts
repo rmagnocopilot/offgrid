@@ -27,7 +27,8 @@ export type UiEvent =
   | { type: 'rejectReview' }
   | { type: 'copyDiagnostics' }
   | { type: 'openLogs' }
-  | { type: 'setDiagnosticsPanel'; value: UiState['diagnosticsPanel'] };
+  | { type: 'setDiagnosticsPanel'; value: UiState['diagnosticsPanel'] }
+  | { type: 'setMode'; mode: ConversationMode };
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewId = 'offgrid.chatView';

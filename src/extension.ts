@@ -243,6 +243,13 @@ async function handleUiEvent(s: Services, event: UiEvent): Promise<void> {
       s.diagnosticsPanel = event.value;
       await vscode.workspace.getConfiguration('offgrid').update('diagnosticsPanel', event.value, vscode.ConfigurationTarget.Global);
       await refreshUi(s); break;
+    case 'setMode':
+      // Persiste o modo imediatamente quando o select é alterado na webview,
+      // antes do próximo submit. Evita que refreshUi sobrescreva o modo
+      // com o valor antigo de s.mode.
+      s.logger.debug('offgrid', `[UI] Modo alterado para: ${event.mode}`);
+      s.mode = event.mode;
+      break;
   }
 }
 
