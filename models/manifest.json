@@ -55,22 +55,22 @@
   "binaries": [
     {
       "fileName": "llama-server-win-x64.exe",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "d4b746f2357137759ba2be772dedd7938f5f857e74ecf4103ad97b253cd2be78",
       "description": "Servidor de inferência llama.cpp para Windows x64. Requerido pelo modo Agente do Offgrid."
     },
     {
       "fileName": "llama-server-linux-x64",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "836ca690b693c31fba47496c6cfd5dc6dd598a1dafba2a4e2a09a8135d7f0c39",
       "description": "Servidor de inferência llama.cpp para Linux x64."
     },
     {
       "fileName": "llama-server-darwin-arm64",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "ff0e2445d93e2d6305c44cce6386db1020385194261dc184deaf0f37c7148d85",
       "description": "Servidor de inferência llama.cpp para macOS Apple Silicon."
     },
     {
       "fileName": "llama-server-darwin-x64",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "58a29482e3273083944d964528a17bc6629ac46d4cf0d152e0fcb6e5c0835e01",
       "description": "Servidor de inferência llama.cpp para macOS Intel."
     }
   ]
