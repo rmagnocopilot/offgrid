@@ -17,7 +17,7 @@ const { normalizeRelativePath, isWriteProtectedPath, resolveInsideRoot } = requi
 const { chooseLoadAttempts, HardwareProfileStore } = require('../out/diagnostics/HardwareProfile');
 const { SessionStore } = require('../out/sessions/SessionStore');
 const { FileLogger } = require('../out/diagnostics/FileLogger');
-const { isDeviceMemoryError } = require('../out/llm/LlamaEngine');
+const { isDeviceMemoryError } = require('../out/llm/LlamaServerEngine');
 const { TOOL_SCHEMAS, schemasForMode, validateToolArguments } = require('../out/tools/ToolRegistry');
 const { ModelCatalog } = require('../out/models/ModelCatalog');
 const { ModelInstaller } = require('../out/models/ModelInstaller');
@@ -373,10 +373,10 @@ test('instalador informa HTTP e limpa arquivos parciais após falha', async t =>
   assert.deepEqual(await fsp.readdir(dir), []);
 });
 
-test('package declara runtime, comandos de pastas e versão de correção', () => {
+test('package não inclui runtime nativo e mantém comandos da versão', () => {
   const pkg = require('../package.json');
   assert.equal(pkg.version, '2.0.2');
-  assert.equal(pkg.dependencies['node-llama-cpp'], '3.19.1');
+  assert.equal(pkg.dependencies?.['node-llama-cpp'], undefined);
   const commands = new Set(pkg.contributes.commands.map(item => item.command));
   for (const command of ['offgrid.openModelsFolder','offgrid.openDataFolder','offgrid.openLogsFolder']) assert.equal(commands.has(command), true);
 });
@@ -433,18 +433,20 @@ test('workflow publica o Qwen3 4B intermediário no release de modelos', () => {
   assert.match(workflow, /7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5/);
 });
 
-test('runtime node-llama-cpp usa import ESM nativo mesmo com saída CommonJS', async () => {
-  const source = fs.readFileSync(path.join(root, 'src/llm/LlamaEngine.ts'), 'utf8');
-  assert.match(source, /Function\('return import\(\"node-llama-cpp\"\)'\)/);
+test('worker usa somente o servidor llama atual', () => {
+  const worker = fs.readFileSync(
+    path.join(root, 'src/engine/EngineWorker.ts'),
+    'utf8'
+  );
 
-  const compiledPath = path.join(root, 'out/llm/LlamaEngine.js');
-  const compiled = fs.readFileSync(compiledPath, 'utf8');
-  assert.doesNotMatch(compiled, /require\(["']node-llama-cpp["']\)/);
-
-  const { importNodeLlamaCppRuntime } = require(compiledPath);
-  const runtime = await importNodeLlamaCppRuntime();
-  assert.equal(typeof runtime.getLlama, 'function');
+  assert.match(worker, /new LlamaServerEngine\(/);
+  assert.doesNotMatch(worker, /new LlamaEngine\(/);
+  assert.equal(
+    fs.existsSync(path.join(root, 'src/llm/LlamaEngine.ts')),
+    false
+  );
 });
+
 
 
 test('ao fechar ou reabrir o chat a conversa atual vai para o histórico', async () => {

@@ -1730,7 +1730,7 @@ function shortModelName(file: string): string {
 }
 function friendlyModelError(error: unknown, model: string): string {
   const text = error instanceof Error ? error.message : String(error);
-  if (/cannot find module|node-llama-cpp/i.test(text)) return `Não foi possível iniciar ${model}: o runtime node-llama-cpp não foi encontrado ou não pôde ser carregado. Consulte os logs.`;
+  if (/llama-server|binário.*não encontrado|cannot find module/i.test(text)) return `Não foi possível iniciar ${model}: o servidor local não foi encontrado ou não pôde ser carregado. Consulte os logs.`;
   if (/memory|allocate|vulkan|outofdevice/i.test(text)) return `Não foi possível carregar ${model}. Causa provável: memória GPU/RAM insuficiente. O Offgrid tentou perfis reduzidos e CPU. Consulte os logs.`;
   return `Não foi possível carregar ${model}: ${text}`;
 }

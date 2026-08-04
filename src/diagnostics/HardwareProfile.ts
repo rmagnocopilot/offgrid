@@ -32,7 +32,7 @@ export function chooseLoadAttempts(options: EngineLoadOptions, resources: Resour
     }
   } else {
     // Diagnóstico indisponível não significa GPU ausente. A tentativa automática é obrigatória.
-    attempts.push({ gpu: 'auto', gpuLayers: options.gpuLayers, reason: 'Detecção padrão do node-llama-cpp' });
+    attempts.push({ gpu: 'auto', gpuLayers: options.gpuLayers, reason: 'Detecção automática do backend' });
   }
   if (options.fallbackToCpu) attempts.push({ gpu: 'cpu', gpuLayers: 0, reason: 'Fallback final para CPU' });
   return dedupe(attempts);
