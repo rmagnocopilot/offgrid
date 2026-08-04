@@ -38,6 +38,34 @@ export function isFileCreationTask(request: string): boolean {
     || ADD_NEW_FILE.test(normalized);
 }
 
+/**
+ * Quando o usuário cita exatamente um nome de arquivo sem informar pasta,
+ * o destino determinístico é a raiz do workspace.
+ */
+export function workspaceRootCreationTarget(
+  explicitFiles: readonly string[],
+  enabled = true
+): string | undefined {
+  if (!enabled || explicitFiles.length !== 1) return undefined;
+
+  const candidate = String(explicitFiles[0] ?? '')
+    .trim()
+    .replace(/\\/g, '/');
+
+  if (
+    !candidate
+    || candidate.includes('/')
+    || /^[A-Za-z]:/u.test(candidate)
+    || candidate === '.'
+    || candidate === '..'
+    || !/^[\w.@()-]+\.[A-Za-z0-9.]+$/u.test(candidate)
+  ) {
+    return undefined;
+  }
+
+  return candidate;
+}
+
 export function agentOutputTokenFloor(request: string): number {
   return isFileCreationTask(request) ? 512 : 0;
 }

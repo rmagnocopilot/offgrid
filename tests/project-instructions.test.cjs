@@ -1,3 +1,4 @@
+const fs = require('node:fs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fsp = require('node:fs/promises');
@@ -85,4 +86,39 @@ test('integra instruções no Chat, no Agente e na preparação de alterações'
   assert.match(extension, /OFFGRID_AGENTS_MD_AGENT/);
   assert.match(tools, /validateContentAgainstProjectInstructions/);
   assert.match(tools, /OFFGRID_AGENTS_MD_VALIDATION/);
+});
+
+
+test('detecta strings repetidas dentro de envelope JSON serializado', () => {
+  const serialized = JSON.stringify({
+    name: 'agents-md-check',
+    functions: [{
+      name: 'processar',
+      body: [
+        'if (true) return "PROCESSANDO";',
+        'if (false) return "PROCESSANDO";',
+        'if (null) return "PROCESSANDO";'
+      ].join('\n')
+    }]
+  });
+
+  const violations = validateProjectContent(
+    'agents-md-check.ts',
+    serialized,
+    { extractStringAfterOccurrences: 2 }
+  );
+
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].rule, 'extractStringAfterOccurrences');
+  assert.match(violations[0].message, /PROCESSANDO/);
+});
+
+test('WorkspaceTools bloqueia JSON serializado usado como código-fonte', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'tools', 'WorkspaceTools.ts'),
+    'utf8'
+  );
+
+  assert.match(source, /serializedCodeEnvelopeIssue\(relative, content\)/);
+  assert.match(source, /serializado como JSON em vez de código-fonte/);
 });

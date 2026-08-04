@@ -6,7 +6,10 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { detectToolCalls } = require('../out/agent/ToolCallParser');
-const { generatedFileContentIssue } = require('../out/agent/AgentTaskPolicy');
+const {
+  generatedFileContentIssue,
+  workspaceRootCreationTarget
+} = require('../out/agent/AgentTaskPolicy');
 const { tryPrepareSimpleEditFastPath } = require('../out/agent/SimpleEditFastPath');
 const { buildAgentWorkspaceContext } = require('../out/agent/WorkspaceContextBuilder');
 
@@ -166,4 +169,35 @@ test('remove envelope java.lang.String do conteúdo de create_file', () => {
   const [call] = detectToolCalls(response);
   assert.ok(call);
   assert.equal(call.arguments.content, java);
+});
+
+
+test('arquivo explícito sem pasta usa a raiz do workspace', () => {
+  assert.equal(
+    workspaceRootCreationTarget(['agents-md-check.ts'], true),
+    'agents-md-check.ts'
+  );
+  assert.equal(
+    workspaceRootCreationTarget(['src/agents-md-check.ts'], true),
+    undefined
+  );
+  assert.equal(
+    workspaceRootCreationTarget(['a.ts', 'b.ts'], true),
+    undefined
+  );
+  assert.equal(
+    workspaceRootCreationTarget(['agents-md-check.ts'], false),
+    undefined
+  );
+});
+
+test('criação na raiz não herda arquivo ativo nem contexto arbitrário', () => {
+  const extension = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'extension.ts'),
+    'utf8'
+  );
+  assert.match(extension, /const contextPriority = rootCreationTarget \? \[\] : priority/);
+  assert.match(extension, /priority: contextPriority/);
+  assert.match(extension, /call\.arguments\.filePath = rootCreationTarget/);
+  assert.match(extension, /createsFiles: genericFileCreationTask && !rootCreationTarget/);
 });

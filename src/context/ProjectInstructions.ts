@@ -148,7 +148,10 @@ export function validateProjectContent(
   }
 
   if (rules.extractStringAfterOccurrences) {
-    for (const repeated of repeatedStrings(content, rules.extractStringAfterOccurrences)) {
+    for (const repeated of repeatedStrings(
+      validationTextFragments(content),
+      rules.extractStringAfterOccurrences
+    )) {
       violations.push({
         rule: 'extractStringAfterOccurrences',
         line: repeated.line,
@@ -288,22 +291,78 @@ function cyclomaticComplexity(content: string): number {
   return 1 + decisions;
 }
 
-function repeatedStrings(content: string, allowedOccurrences: number): Array<{ value: string; count: number; line: number }> {
+function repeatedStrings(contents: readonly string[], allowedOccurrences: number): Array<{ value: string; count: number; line: number }> {
   const counts = new Map<string, { count: number; line: number }>();
   const regex = /(['"])(?:(?!\1|\\).|\\.)*\1|`(?:[^`\\$]|\\.|\$(?!\{))*`/gs;
-  for (const match of content.matchAll(regex)) {
-    const literal = match[0];
-    const value = literal.slice(1, -1);
-    const prefix = content.slice(Math.max(0, match.index! - 32), match.index!);
-    if (/\b(?:from|import|require)\s*\(?\s*$/i.test(prefix)) continue;
-    if (value.trim().length < 4 || /^\.\.?\//.test(value) || /^[A-Za-z0-9_./-]+\.(?:ts|js|json|css|html|java)$/.test(value)) continue;
-    const current = counts.get(value);
-    if (current) current.count += 1;
-    else counts.set(value, { count: 1, line: lineAt(content, match.index!) });
+
+  for (const content of contents) {
+    for (const match of content.matchAll(regex)) {
+      const literal = match[0];
+      const value = literal.slice(1, -1);
+      const prefix = content.slice(Math.max(0, match.index! - 32), match.index!);
+      if (/\b(?:from|import|require)\s*\(?\s*$/i.test(prefix)) continue;
+      if (
+        value.trim().length < 4
+        || /^\.\.?\//.test(value)
+        || /^[A-Za-z0-9_./-]+\.(?:ts|js|json|css|html|java)$/.test(value)
+      ) {
+        continue;
+      }
+
+      const current = counts.get(value);
+      if (current) current.count += 1;
+      else counts.set(value, { count: 1, line: lineAt(content, match.index!) });
+    }
   }
+
   return [...counts.entries()]
     .filter(([, data]) => data.count > allowedOccurrences)
     .map(([value, data]) => ({ value, count: data.count, line: data.line }));
+}
+
+/**
+ * Alguns modelos pequenos serializam uma representação intermediária em JSON
+ * dentro de content. As regras do AGENTS.md também precisam inspecionar os
+ * textos internos desse envelope, sem aceitar o JSON como código-fonte.
+ */
+function validationTextFragments(content: string): string[] {
+  const trimmed = content.trim();
+  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+    return [content];
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    const fragments: string[] = [];
+    collectJsonTextFragments(parsed, fragments, new Set<string>());
+    return fragments.length ? fragments : [content];
+  } catch {
+    return [content];
+  }
+}
+
+function collectJsonTextFragments(
+  value: unknown,
+  fragments: string[],
+  seen: Set<string>
+): void {
+  if (typeof value === 'string') {
+    if (value && !seen.has(value)) {
+      seen.add(value);
+      fragments.push(value);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(item => collectJsonTextFragments(item, fragments, seen));
+    return;
+  }
+
+  if (!value || typeof value !== 'object') return;
+  Object.values(value).forEach(item =>
+    collectJsonTextFragments(item, fragments, seen)
+  );
 }
 
 function findPlaceholder(content: string): { line: number; text: string } | undefined {

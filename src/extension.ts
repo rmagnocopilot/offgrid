@@ -39,7 +39,12 @@ import { interpretLayeredTask } from './agent/LayeredTaskIntent';
 import { analyzeFrontendCrudIntent, frontendCrudTaskGuidance } from './agent/FrontendCrudIntent';
 import { analyzeFullStackFlowIntent, fullStackFlowTaskGuidance } from './agent/FullStackFlowIntent';
 import { analyzeFullStackRelationRefactorIntent } from './agent/FullStackRelationRefactorIntent';
-import { agentOutputTokenFloor, generatedFileContentIssue, isFileCreationTask } from './agent/AgentTaskPolicy';
+import {
+  agentOutputTokenFloor,
+  generatedFileContentIssue,
+  isFileCreationTask,
+  workspaceRootCreationTarget
+} from './agent/AgentTaskPolicy';
 import { schemasForMode, validateToolArguments } from './tools/ToolRegistry';
 import type {
   AgentAutonomy, ApprovalMode, ConversationMode, DiagnosticsPanelMode, EngineDiagnostics, EngineLoadOptions,
@@ -393,6 +398,11 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
       );
       const fileCreationTask = mode === 'agent' && isFileCreationTask(text);
       const genericFileCreationTask = fileCreationTask && !frontendCrudAnalysis && !backendServiceAnalysis && !backendEndpointAnalysis && !fullStackFlowAnalysis && !fullStackRelationRefactorAnalysis;
+      const rootCreationTarget = workspaceRootCreationTarget(
+        layeredTask.explicitFiles,
+        genericFileCreationTask
+      );
+      const contextPriority = rootCreationTarget ? [] : priority;
       const fileCreationTools = new Set([
         'get_active_file',
         'list_files',
@@ -674,10 +684,10 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
 
       const taskContextEstimate = estimateTaskComplexity({
         request: text,
-        estimatedFiles: Math.max(1, priority.length),
+        estimatedFiles: rootCreationTarget ? 1 : Math.max(1, contextPriority.length),
         fullStack: Boolean(fullStackFlowAnalysis || fullStackRelationRefactorAnalysis),
         multiLayer: Boolean(frontendCrudAnalysis || backendServiceAnalysis || backendEndpointAnalysis),
-        createsFiles: genericFileCreationTask
+        createsFiles: genericFileCreationTask && !rootCreationTarget
       });
       await ensureAutomaticContextForTask(s, taskContextEstimate);
 
@@ -720,12 +730,14 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         mode,
         text,
         modelTier,
-        priority
+        contextPriority
       );
       // OFFGRID_AGENTS_MD_AGENT: mantém as regras no prompt de sistema.
       const agentInstructionContext = await loadProjectInstructions({
         workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-        targetFiles: s.contextManager.priority(text)
+        targetFiles: rootCreationTarget
+          ? [rootCreationTarget]
+          : s.contextManager.priority(text)
       });
       if (agentInstructionContext.files.length) {
         s.logger.debug('agent', `[AGENTS.md] Agente: ${agentInstructionContext.files.map(file => file.filePath).join(' → ')}`);
@@ -739,7 +751,18 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         `[Flow][2/6] Prompt de sistema concluído em ${Date.now() - systemPromptStartedAt} ms; caracteres=${agentSystem.length}.`
       );
 
-      const taskEnvelope = `<tarefa_usuario>\n${text}\n</tarefa_usuario>`;
+      const creationTargetEnvelope = rootCreationTarget
+        ? [
+            '<destino_criacao_obrigatorio>',
+            `Crie exatamente o arquivo "${rootCreationTarget}" na raiz do workspace.`,
+            'Não escolha subpasta e não use o arquivo ativo como destino ou contexto.',
+            '</destino_criacao_obrigatorio>'
+          ].join('\n')
+        : '';
+      const taskEnvelope = [
+        creationTargetEnvelope,
+        `<tarefa_usuario>\n${text}\n</tarefa_usuario>`
+      ].filter(Boolean).join('\n\n');
       const budget = calculateAgentContextBudget({
         contextSize,
         configuredMaxTokens,
@@ -757,7 +780,7 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         'agent',
         [
           '[Flow][3/6] Iniciando análise automática do workspace.',
-          `prioridade=${priority.join(' → ') || 'nenhuma'}`,
+          `prioridade=${contextPriority.join(' → ') || 'nenhuma'}`,
           `modelTier=${budget.modelTier}`,
           `limiteArquivos=${effectiveMaxFiles}`,
           `limiteTotal=${budget.workspaceChars}`,
@@ -769,11 +792,11 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
 
       const workspaceContext = await buildAgentWorkspaceContext({
         workspaceRoot,
-        priority,
+        priority: contextPriority,
         maxFiles: effectiveMaxFiles,
         maxCharsPerFile: budget.maxCharsPerFile,
         maxTotalChars: budget.workspaceChars,
-        includeTestRelated: genericFileCreationTask
+        includeTestRelated: genericFileCreationTask && !rootCreationTarget
       });
 
       const contextCharacters = workspaceContext.files.reduce(
@@ -838,6 +861,18 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
               error: `Ferramenta "${call.name}" não existe. Ferramentas disponíveis no modo ${mode}: ${validNames}.`,
               durationMs: 0
             });
+          }
+          if (call.name === 'create_file' && rootCreationTarget) {
+            const proposedPath = typeof call.arguments.filePath === 'string'
+              ? call.arguments.filePath.replace(/\\/g, '/')
+              : '';
+            if (proposedPath !== rootCreationTarget) {
+              s.logger.info(
+                'agent',
+                `[Tool] Destino de create_file normalizado para a raiz: ${rootCreationTarget}.`
+              );
+            }
+            call.arguments.filePath = rootCreationTarget;
           }
           if (call.name === 'create_file') {
             const contentIssue = generatedFileContentIssue(

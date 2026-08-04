@@ -310,6 +310,10 @@ export class WorkspaceTools {
       const details = projectValidation.violations.map(item => `- ${item.line ? `linha ${item.line}: ` : ''}${item.message}`).join('\n');
       throw new Error(`Alteração bloqueada pelas regras do AGENTS.md em ${relative}:\n${details}`);
     }
+
+    const serializedIssue = serializedCodeEnvelopeIssue(relative, content);
+    if (serializedIssue) throw new Error(serializedIssue);
+
     const approved = previous
       ? true
       : existed
@@ -371,9 +375,42 @@ export class WorkspaceTools {
       await fsp.mkdir(path.dirname(absolute), { recursive: true });
       await fsp.writeFile(absolute, entry.content, 'utf8');
     }
-  }
+  } 
   private async loadMemory(): Promise<void> { if (this.memoryFile) try { this.memory = JSON.parse(await fsp.readFile(this.memoryFile, 'utf8')); } catch { this.memory = []; } }
   private requireWorkspace(): void { if (!this.workspaceRoot) throw new Error('Nenhum workspace aberto.'); }
+}
+
+const SOURCE_CODE_EXTENSIONS = new Set([
+  '.c', '.cc', '.cpp', '.cs', '.go', '.java', '.js', '.jsx', '.kt', '.kts',
+  '.mjs', '.cjs', '.php', '.py', '.rs', '.ts', '.tsx'
+]);
+
+function serializedCodeEnvelopeIssue(
+  filePath: string,
+  content: string
+): string | undefined {
+  if (!SOURCE_CODE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+    return undefined;
+  }
+
+  const trimmed = content.trim();
+  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+    return undefined;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed && typeof parsed === 'object') {
+      return [
+        `O conteúdo de ${filePath} foi serializado como JSON em vez de código-fonte.`,
+        'Envie somente o código completo do arquivo no argumento content.'
+      ].join(' ');
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
 }
 
 function safeRegex(query: string): RegExp { try { return new RegExp(query, 'i'); } catch { return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); } }
