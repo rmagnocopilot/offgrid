@@ -45,20 +45,26 @@ jobs:
               --notes "Modelos divididos em partes menores que 2 GB. A extensão remonta e valida o SHA-256 localmente. Consulte docs/MODEL_LICENSES.md antes do uso."
           fi
 
-      - name: Baixar, validar e publicar Qwen 1.5B
+      - name: Baixar, validar e publicar Qwen3 4B
         shell: bash
         run: |
           set -euo pipefail
-          FILE="qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
-          URL="https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/${FILE}?download=true"
-          EXPECTED="cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046"
-          mkdir -p work/1.5b
-          curl --fail --location --retry 5 --retry-all-errors \
-            --output "work/1.5b/$FILE" "$URL"
-          ACTUAL="$(sha256sum "work/1.5b/$FILE" | awk '{print $1}')"
+          SOURCE_FILE="Qwen3-4B-Q4_K_M.gguf"
+          FILE="qwen3-4b-q4_k_m.gguf"
+          URL="https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/${SOURCE_FILE}?download=true"
+          EXPECTED="7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"
+          mkdir -p work/parts
+          mkfifo work/hash-stream
+          sha256sum < work/hash-stream | awk '{print $1}' > work/digest &
+          HASH_PID=$!
+          curl --fail --location --retry 5 --retry-all-errors "$URL" \
+            | tee work/hash-stream \
+            | split -b "$CHUNK_SIZE" -d -a 2 - "work/parts/$FILE.part-"
+          wait "$HASH_PID"
+          ACTUAL="$(cat work/digest)"
           [[ "$ACTUAL" == "$EXPECTED" ]] || { echo "SHA-256 inválido: $ACTUAL"; exit 1; }
-          gh release upload "$RELEASE_TAG" "work/1.5b/$FILE" --clobber
-          rm -rf work/1.5b
+          gh release upload "$RELEASE_TAG" work/parts/$FILE.part-* --clobber
+          rm -rf work
 
       - name: Baixar, validar e publicar Qwen 7B
         shell: bash
@@ -182,8 +188,9 @@ jobs:
           set -euo pipefail
           mkdir -p release-metadata
           curl --fail --location --retry 5 \
-            --output release-metadata/QWEN-1.5B-APACHE-2.0.txt \
-            "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct/resolve/main/LICENSE"          curl --fail --location --retry 5 \
+            --output release-metadata/QWEN3-4B-APACHE-2.0.txt \
+            "https://huggingface.co/Qwen/Qwen3-4B/resolve/main/LICENSE"
+          curl --fail --location --retry 5 \
             --output release-metadata/QWEN-7B-APACHE-2.0.txt \
             "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct/resolve/main/LICENSE"
           if [[ "${{ inputs.include_3b }}" == "true" ]]; then

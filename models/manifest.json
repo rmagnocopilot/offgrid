@@ -1,94 +1,101 @@
 {
-    "schemaVersion":  1,
-    "releaseTag":  "models-v1",
-    "chunkSize":  "1900M",
-    "models":  [
-                   {
-                       "id":  "qwen3-4b-q4_k_m",
-                       "displayName":  "Qwen3-4B Q4_K_M — Intermediário",
-                       "fileName":  "qwen3-4b-q4_k_m.gguf",
-                       "description":  "Modelo intermediário recomendado para Chat e Agente, com maior capacidade de raciocínio e geração de código.",
-                       "hardware":  "CPU; recomendado 12 GB de RAM ou mais",
-                       "approxSize":  "~2,5 GB",
-                       "sha256":  "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
-                       "parts":  [
-                                     "qwen3-4b-q4_k_m.gguf.part-00",
-                                     "qwen3-4b-q4_k_m.gguf.part-01"
-                                 ],
-                       "license":  "Apache-2.0",
-                       "commercialUse":  true,
-                       "source":  "https://huggingface.co/Qwen/Qwen3-4B-GGUF"
-                   },
-                   {
-                       "id":  "qwen2.5-coder-3b-q4_k_m",
-                       "displayName":  "Qwen2.5-Coder-3B-Instruct Q4_K_M",
-                       "fileName":  "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
-                       "description":  "OpÃ§Ã£o econÃ´mica especializada em cÃ³digo, indicada para mÃ¡quinas com memÃ³ria limitada.",
-                       "hardware":  "CPU; recomendado 8 GB de RAM ou mais; contexto automÃ¡tico entre 4096 e 8192",
-                       "approxSize":  "~2,1 GB",
-                       "sha256":  "724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7",
-                       "parts":  [
-                                     "qwen2.5-coder-3b-instruct-q4_k_m.gguf.part-00",
-                                     "qwen2.5-coder-3b-instruct-q4_k_m.gguf.part-01"
-                                 ],
-                       "license":  "Qwen Research License",
-                       "commercialUse":  false,
-                       "source":  "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
-                       "parameterCountB":  3.09,
-                       "contextProfile":  {
-                                              "minimum":  4096,
-                                              "base":  4096,
-                                              "complex":  8192,
-                                              "maximum":  8192
-                                          },
-                       "promptMode":  "default"
-                   },
-                   {
-                       "id":  "qwen2.5-coder-7b-q4_k_m",
-                       "displayName":  "Qwen2.5-Coder-7B-Instruct Q4_K_M",
-                       "fileName":  "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-                       "description":  "Melhor qualidade para uso geral e empresarial.",
-                       "hardware":  "CPU com pelo menos 16 GB de RAM ou GPU compatÃ­vel; contexto automÃ¡tico entre 4096 e 16384",
-                       "approxSize":  "~4,7 GB",
-                       "sha256":  "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c",
-                       "parts":  [
-                                     "qwen2.5-coder-7b-instruct-q4_k_m.gguf.part-00",
-                                     "qwen2.5-coder-7b-instruct-q4_k_m.gguf.part-01",
-                                     "qwen2.5-coder-7b-instruct-q4_k_m.gguf.part-02"
-                                 ],
-                       "license":  "Apache-2.0",
-                       "commercialUse":  true,
-                       "source":  "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-                       "parameterCountB":  7.61,
-                       "contextProfile":  {
-                                              "minimum":  4096,
-                                              "base":  8192,
-                                              "complex":  12288,
-                                              "maximum":  16384
-                                          },
-                       "promptMode":  "default"
-                   }
-               ],
-    "binaries":  [
-                     {
-                         "fileName":  "llama-server-win-x64.zip",
-                         "sha256":  "4d75b0dc52f42cdfdb547ef858662620e843bdf43d65e14ba233a6e20c103b52",
-                         "description":  "Servidor de inferÃªncia llama.cpp para Windows x64 (inclui DLLs necessÃ¡rias). Requerido pelo modo Agente do Offgrid."
-                     },
-                     {
-                         "fileName":  "llama-server-linux-x64",
-                         "sha256":  "836ca690b693c31fba47496c6cfd5dc6dd598a1dafba2a4e2a09a8135d7f0c39",
-                         "description":  "Servidor de inferÃªncia llama.cpp para Linux x64."
-                     },
-                     {
-                         "fileName":  "llama-server-darwin-arm64",
-                         "sha256":  "ff0e2445d93e2d6305c44cce6386db1020385194261dc184deaf0f37c7148d85",
-                         "description":  "Servidor de inferÃªncia llama.cpp para macOS Apple Silicon."
-                     },
-                     {
-                         "fileName":  "llama-server-darwin-x64",
-                         "sha256":  "58a29482e3273083944d964528a17bc6629ac46d4cf0d152e0fcb6e5c0835e01",
-                         "description":  "Servidor de inferÃªncia llama.cpp para macOS Intel."
-                     }
-                 ]
+  "schemaVersion": 1,
+  "releaseTag": "models-v1",
+  "chunkSize": "1900M",
+  "models": [
+    {
+      "id": "qwen2.5-coder-3b-q4_k_m",
+      "displayName": "Qwen2.5-Coder-3B-Instruct Q4_K_M",
+      "fileName": "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+      "description": "Op??o econ?mica especializada em c?digo, indicada para m?quinas com mem?ria limitada.",
+      "hardware": "CPU; recomendado 8 GB de RAM ou mais; contexto autom?tico entre 4096 e 8192",
+      "approxSize": "~2,1 GB",
+      "sha256": "724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7",
+      "parts": [
+        "qwen2.5-coder-3b-instruct-q4_k_m.gguf.part-00",
+        "qwen2.5-coder-3b-instruct-q4_k_m.gguf.part-01"
+      ],
+      "license": "Qwen Research License",
+      "commercialUse": false,
+      "source": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+      "parameterCountB": 3.09,
+      "contextProfile": {
+        "minimum": 4096,
+        "base": 4096,
+        "complex": 8192,
+        "maximum": 8192
+      },
+      "promptMode": "default"
+    },
+    {
+      "id": "qwen3-4b-q4_k_m",
+      "displayName": "Qwen3-4B Q4_K_M ? Intermedi?rio",
+      "fileName": "qwen3-4b-q4_k_m.gguf",
+      "description": "Modelo intermedi?rio recomendado para Chat e Agente, com maior capacidade de racioc?nio e gera??o de c?digo.",
+      "hardware": "CPU; recomendado 12 GB de RAM ou mais; contexto autom?tico entre 4096 e 12288",
+      "approxSize": "~2,5 GB",
+      "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "parts": [
+        "qwen3-4b-q4_k_m.gguf.part-00",
+        "qwen3-4b-q4_k_m.gguf.part-01"
+      ],
+      "license": "Apache-2.0",
+      "commercialUse": true,
+      "source": "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
+      "contextProfile": {
+        "minimum": 4096,
+        "base": 8192,
+        "complex": 12288,
+        "maximum": 12288
+      },
+      "promptMode": "no-think"
+    },
+    {
+      "id": "qwen2.5-coder-7b-q4_k_m",
+      "displayName": "Qwen2.5-Coder-7B-Instruct Q4_K_M",
+      "fileName": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+      "description": "Melhor qualidade para uso geral e empresarial.",
+      "hardware": "CPU com pelo menos 16 GB de RAM ou GPU compat?vel; contexto autom?tico entre 4096 e 16384",
+      "approxSize": "~4,7 GB",
+      "sha256": "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c",
+      "parts": [
+        "qwen2.5-coder-7b-instruct-q4_k_m.gguf.part-00",
+        "qwen2.5-coder-7b-instruct-q4_k_m.gguf.part-01",
+        "qwen2.5-coder-7b-instruct-q4_k_m.gguf.part-02"
+      ],
+      "license": "Apache-2.0",
+      "commercialUse": true,
+      "source": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+      "parameterCountB": 7.61,
+      "contextProfile": {
+        "minimum": 4096,
+        "base": 8192,
+        "complex": 12288,
+        "maximum": 16384
+      },
+      "promptMode": "default"
+    }
+  ],
+  "binaries": [
+    {
+      "fileName": "llama-server-win-x64.zip",
+      "sha256": "4d75b0dc52f42cdfdb547ef858662620e843bdf43d65e14ba233a6e20c103b52",
+      "description": "Servidor de infer?ncia llama.cpp para Windows x64 (inclui DLLs necess?rias). Requerido pelo modo Agente do Offgrid."
+    },
+    {
+      "fileName": "llama-server-linux-x64",
+      "sha256": "836ca690b693c31fba47496c6cfd5dc6dd598a1dafba2a4e2a09a8135d7f0c39",
+      "description": "Servidor de infer?ncia llama.cpp para Linux x64."
+    },
+    {
+      "fileName": "llama-server-darwin-arm64",
+      "sha256": "ff0e2445d93e2d6305c44cce6386db1020385194261dc184deaf0f37c7148d85",
+      "description": "Servidor de infer?ncia llama.cpp para macOS Apple Silicon."
+    },
+    {
+      "fileName": "llama-server-darwin-x64",
+      "sha256": "58a29482e3273083944d964528a17bc6629ac46d4cf0d152e0fcb6e5c0835e01",
+      "description": "Servidor de infer?ncia llama.cpp para macOS Intel."
+    }
+  ]
 }

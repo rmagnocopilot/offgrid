@@ -11,7 +11,7 @@ const { execFileSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const { extractExplicitFileReferences, buildContextPriority } = require('../out/agent/AgentContext');
 const { buildAgentWorkspaceContext } = require('../out/agent/WorkspaceContextBuilder');
-const { detectToolCall, looksLikeToolCall, looksLikeToolSchema } = require('../out/agent/ToolCallParser');
+const { detectToolCall, detectToolCalls, looksLikeToolCall, looksLikeToolSchema } = require('../out/agent/ToolCallParser');
 const { AgentLoop } = require('../out/agent/AgentLoop');
 const { normalizeRelativePath, isWriteProtectedPath, resolveInsideRoot } = require('../out/safety/PathSafety');
 const { chooseLoadAttempts, HardwareProfileStore } = require('../out/diagnostics/HardwareProfile');
@@ -70,6 +70,23 @@ test('encontra JSON balanceado dentro de texto', () => {
   assert.equal(call.name, 'search_codebase');
 });
 
+test('interpreta várias chamadas de ferramenta na mesma resposta', () => {
+  const calls = detectToolCalls([
+    '{"name":"read_file","arguments":{"filePath":"a.html"}}',
+    '{"name":"apply_edit","arguments":{"filePath":"a.html","oldText":"A","newText":"B"}}',
+    '{"name":"apply_changes","arguments":{"summary":"Título alterado"}}'
+  ].join('\n'));
+  assert.deepEqual(calls.map(call => call.name), ['read_file', 'apply_edit', 'apply_changes']);
+});
+
+test('remove chamadas idênticas repetidas na mesma resposta', () => {
+  const calls = detectToolCalls([
+    '{"name":"read_file","arguments":{"filePath":"a.html"}}',
+    '{"name":"read_file","arguments":{"filePath":"a.html"}}'
+  ].join('\n'));
+  assert.equal(calls.length, 1);
+});
+
 test('normaliza aliases antigos do Agente', () => {
   assert.equal(detectToolCall('{"name":"listWorkspaceFiles","arguments":{}}').name, 'list_files');
   assert.equal(detectToolCall('{"name":"applyChanges","arguments":{"summary":"ok"}}').name, 'apply_changes');
@@ -94,6 +111,53 @@ test('AgentLoop executa ferramenta e devolve resultado ao modelo', async () => {
     async executeTool(call) { return { callId: call.id, name: call.name, ok: true, content: ['a.ts'], durationMs: 1 }; }
   });
   assert.equal(result.text, 'Arquivos encontrados.'); assert.equal(result.calls.length, 1); assert.match(prompts[1], /resultado_ferramenta/);
+});
+
+test('AgentLoop executa várias ferramentas da mesma resposta e encerra em apply_changes', async () => {
+  let generations = 0;
+  const executed = [];
+  const result = await new AgentLoop().run({
+    initialPrompt: 'altere o título', maxSteps: 3, diagnosticMode: true, log() {},
+    async invokeStep() {
+      generations += 1;
+      return [
+        '{"name":"read_file","arguments":{"filePath":"a.html"}}',
+        '{"name":"apply_edit","arguments":{"filePath":"a.html","oldText":"A","newText":"B"}}',
+        '{"name":"apply_changes","arguments":{"summary":"Título alterado"}}'
+      ].join('\n');
+    },
+    async executeTool(call) {
+      executed.push(call.name);
+      return { callId: call.id, name: call.name, ok: true, content: call.name === 'apply_changes' ? { files: ['a.html'] } : 'ok', durationMs: 1 };
+    }
+  });
+  assert.equal(generations, 1);
+  assert.deepEqual(executed, ['read_file', 'apply_edit', 'apply_changes']);
+  assert.deepEqual(result.calls.map(call => call.name), executed);
+  assert.match(result.text, /Título alterado/);
+});
+
+test('AgentLoop continua o lote após uma ferramenta falhar', async () => {
+  const executed = [];
+  const result = await new AgentLoop().run({
+    initialPrompt: 'altere o título', maxSteps: 2, diagnosticMode: false, log() {},
+    async invokeStep() {
+      return [
+        '{"name":"ferramenta_inexistente","arguments":{}}',
+        '{"name":"apply_edit","arguments":{"filePath":"a.html","oldText":"A","newText":"B"}}',
+        '{"name":"apply_changes","arguments":{"summary":"Título alterado"}}'
+      ].join('\n');
+    },
+    async executeTool(call) {
+      executed.push(call.name);
+      if (call.name === 'ferramenta_inexistente') {
+        return { callId: call.id, name: call.name, ok: false, content: null, error: 'não existe', durationMs: 0 };
+      }
+      return { callId: call.id, name: call.name, ok: true, content: 'ok', durationMs: 0 };
+    }
+  });
+  assert.deepEqual(executed, ['ferramenta_inexistente', 'apply_edit', 'apply_changes']);
+  assert.match(result.text, /Título alterado/);
 });
 test('AgentLoop não exibe JSON de ferramenta inválido como resposta final', async () => {
   let attempts = 0;
@@ -243,8 +307,8 @@ test('logger respeita nível configurado', async () => {
 test('reconhece erros comuns de memória de GPU', () => {
   assert.equal(isDeviceMemoryError(new Error('vk::Device::allocateMemory: ErrorOutOfDeviceMemory')), true); assert.equal(isDeviceMemoryError(new Error('arquivo ausente')), false);
 });
-test('catálogo contém 20 ferramentas e remove escrita de Planejar', () => {
-  assert.equal(TOOL_SCHEMAS.length, 20); assert.ok(schemasForMode('agent').some(x => x.write)); assert.ok(schemasForMode('plan').every(x => !x.write)); assert.equal(schemasForMode('chat').length, 0);
+test('catálogo contém 21 ferramentas e remove escrita de Planejar', () => {
+  assert.equal(TOOL_SCHEMAS.length, 21); assert.ok(schemasForMode('agent').some(x => x.write)); assert.ok(schemasForMode('plan').every(x => !x.write)); assert.equal(schemasForMode('chat').length, 0);
 });
 test('catálogo de modelos deriva release models-v1 do repositório', () => {
   const catalog = new ModelCatalog(root, path.join(root, '.tmp-models'));
@@ -252,8 +316,8 @@ test('catálogo de modelos deriva release models-v1 do repositório', () => {
   const modelIds = catalog.manifest.models.map(model => model.id);
 
   assert.deepEqual(modelIds, [
-    'qwen2.5-coder-1.5b-q4_k_m',
     'qwen2.5-coder-3b-q4_k_m',
+    'qwen3-4b-q4_k_m',
     'qwen2.5-coder-7b-q4_k_m'
   ]);
 
@@ -362,11 +426,11 @@ test('chat oculta eventos operacionais do motor e mantém conversa útil', () =>
   assert.match(webview, /previous\?\.role === 'system'/);
 });
 
-test('workflow publica também o modelo 1.5B no release de modelos', () => {
+test('workflow publica o Qwen3 4B intermediário no release de modelos', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/publish-models.yml'), 'utf8');
-  assert.match(workflow, /Baixar, validar e publicar Qwen 1\.5B/);
-  assert.match(workflow, /qwen2\.5-coder-1\.5b-instruct-q4_k_m\.gguf/);
-  assert.match(workflow, /cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046/);
+  assert.match(workflow, /Baixar, validar e publicar Qwen3 4B/);
+  assert.match(workflow, /Qwen3-4B-Q4_K_M\.gguf/);
+  assert.match(workflow, /7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5/);
 });
 
 test('runtime node-llama-cpp usa import ESM nativo mesmo com saída CommonJS', async () => {
@@ -463,8 +527,8 @@ test('interface possui breakpoints responsivos e modos completos', () => {
   const css = fs.readFileSync(path.join(root,'resources/webview/main.css'),'utf8'); const ui = fs.readFileSync(path.join(root,'src/ui/ChatViewProvider.ts'),'utf8'); assert.match(css,/@media\(max-width:520px\)/); assert.match(css,/@media\(max-width:330px\)/); for (const mode of ['Chat','Planejar','Somente leitura','Agente']) assert.match(ui,new RegExp(mode));
 });
 test('fontes não contêm sinais conhecidos de mojibake', async () => {
-  const bad = ['Mem��ria','nÃ£o','alteraÃ§','diagn¾'];
-  for (const dir of ['src','resources']) for (const file of walk(path.join(root,dir))) { const text = await fsp.readFile(file,'utf8'); for (const token of bad) assert.equal(text.includes(token),false,`${file} contém ${token}`); }
+  const bad = ['Mem��ria','nÃ£o','alteraÃ§','diagn¾','Ã¡','Ã©','Ã§','Ã³','Ãª','Ã­','â€”'];
+  for (const dir of ['src','resources','models']) for (const file of walk(path.join(root,dir))) { const text = await fsp.readFile(file,'utf8'); for (const token of bad) assert.equal(text.includes(token),false,`${file} contém ${token}`); }
 });
 test('saída compilada contém extensão, worker e webview', () => {
   for (const file of ['out/extension.js','out/engine/EngineWorker.js','out/ui/webview/main.js']) assert.equal(fs.existsSync(path.join(root,file)),true,file);
@@ -473,3 +537,45 @@ test('saída compilada contém extensão, worker e webview', () => {
 function walk(directory) {
   const result=[]; for (const entry of fs.readdirSync(directory,{withFileTypes:true})) { const full=path.join(directory,entry.name); if(entry.isDirectory()) result.push(...walk(full)); else result.push(full); } return result;
 }
+
+test('contexto de teste Java não carrega spec TypeScript de outro módulo', async t => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-java-context-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const files = {
+    'backend/src/main/java/com/example/service/OrderService.java': [
+      'package com.example.service;',
+      'import com.example.model.Order;',
+      'import com.example.repository.OrderRepository;',
+      'import java.util.List;',
+      'public class OrderService {',
+      '  private OrderRepository repository;',
+      '  public List<Order> listarTodos() { return repository.getOrders(); }',
+      '}'
+    ].join('\n'),
+    'backend/src/main/java/com/example/model/Order.java': 'package com.example.model; public class Order {}',
+    'backend/src/main/java/com/example/repository/OrderRepository.java': 'package com.example.repository; public class OrderRepository {}',
+    'backend/pom.xml': '<project><dependencies></dependencies></project>',
+    'frontend/src/app/unrelated.component.spec.ts': "it('x', () => expect(true).toBe(true));"
+  };
+
+  for (const [relative, content] of Object.entries(files)) {
+    const absolute = path.join(dir, relative);
+    await fsp.mkdir(path.dirname(absolute), { recursive: true });
+    await fsp.writeFile(absolute, content, 'utf8');
+  }
+
+  const context = await buildAgentWorkspaceContext({
+    workspaceRoot: dir,
+    priority: ['backend/src/main/java/com/example/service/OrderService.java'],
+    includeTestRelated: true,
+    maxFiles: 4
+  });
+  const paths = context.files.map(file => file.filePath);
+
+  assert.ok(paths.includes('backend/src/main/java/com/example/service/OrderService.java'));
+  assert.ok(paths.includes('backend/src/main/java/com/example/model/Order.java'));
+  assert.ok(paths.includes('backend/src/main/java/com/example/repository/OrderRepository.java'));
+  assert.ok(paths.includes('backend/pom.xml'));
+  assert.equal(paths.some(file => file.endsWith('.spec.ts')), false);
+});

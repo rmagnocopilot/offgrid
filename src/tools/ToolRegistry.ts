@@ -16,9 +16,10 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   schema('git_diff', 'Retorna git diff, opcionalmente de um arquivo.', { filePath: stringProp() }, false),
   schema('get_memory', 'Pesquisa decisões e padrões salvos na memória do projeto.', { query: stringProp() }, false),
   schema('save_memory', 'Salva uma decisão ou padrão na memória do projeto.', { title: stringProp(), content: stringProp(), type: stringProp() }, true, ['title','content']),
-  schema('apply_edit', 'Prepara substituição exata em arquivo existente; não salva antes da revisão.', { filePath: stringProp(), oldText: stringProp(), newText: stringProp(), replaceAll: boolProp() }, true, ['filePath','oldText','newText']),
-  schema('create_file', 'Prepara um novo arquivo para revisão.', { filePath: stringProp(), content: stringProp(), reason: stringProp('Motivo técnico para criar o arquivo') }, true, ['filePath','content']),
+  schema('apply_edit', 'Modifica arquivo existente por substituição exata; use esta ferramenta para editar arquivos que já existem. Não salva antes da revisão.', { filePath: stringProp(), oldText: stringProp(), newText: stringProp(), replaceAll: boolProp() }, true, ['filePath','oldText','newText']),
+  schema('create_file', 'Cria somente arquivo inexistente. Nunca use para modificar arquivo já existente; nesse caso use apply_edit.', { filePath: stringProp(), content: stringProp(), reason: stringProp('Motivo técnico para criar o arquivo') }, true, ['filePath','content']),
   schema('delete_file', 'Prepara exclusão de arquivo para revisão.', { filePath: stringProp(), reason: stringProp('Motivo técnico para excluir o arquivo') }, true, ['filePath']),
+  schema('rename_file', 'Prepara renomear ou mover um arquivo existente para um novo caminho, preservando o conteúdo.', { filePath: stringProp('Caminho atual'), newPath: stringProp('Novo caminho') }, true, ['filePath','newPath']),
   schema('run_terminal', 'Executa comando no terminal após confirmação explícita.', { command: stringProp() }, true, ['command']),
   schema('apply_changes', 'Finaliza alterações preparadas e abre revisão.', { summary: stringProp() }, true, ['summary'])
 ];
@@ -41,7 +42,7 @@ export function validateToolArguments(tool: ToolSchema, args: Record<string, unk
       return `Argumento obrigatório ausente: ${required}.`;
     }
   }
-  if (schemaValue.additionalProperties === false) {
+  if (schemaValue.additionalProperties === false && Object.keys(properties).length > 0) {
     const unexpected = Object.keys(args).find(key => !(key in properties));
     if (unexpected) return `Argumento não reconhecido: ${unexpected}.`;
   }

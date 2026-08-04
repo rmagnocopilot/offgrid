@@ -8,6 +8,7 @@ import type { AgentAutonomy, PendingFileChange, PendingReview, ToolCall, ToolRes
 import { normalizeRelativePath, isWriteProtectedPath, resolveInsideRoot, assertNoSymlinkEscape } from '../safety/PathSafety';
 import { ApprovalService } from '../safety/ApprovalService';
 import type { FileLogger } from '../diagnostics/FileLogger';
+import { validateContentAgainstProjectInstructions } from '../context/ProjectInstructions';
 
 const execFileAsync = promisify(execFile);
 const EXCLUDE = '**/{node_modules,.git,out,dist,build,coverage,.next,.nuxt,.cache,.venv,venv,target}/**';
@@ -121,6 +122,7 @@ export class WorkspaceTools {
       case 'apply_edit': return this.applyEdit(args);
       case 'create_file': return this.stageFile(String(args.filePath), String(args.content ?? ''), false, String(args.reason ?? ''));
       case 'delete_file': return this.stageDelete(String(args.filePath), String(args.reason ?? ''));
+      case 'rename_file': return this.renameFile(String(args.filePath), String(args.newPath));
       case 'run_terminal': return this.runTerminal(String(args.command));
       case 'apply_changes': {
         if (!this.staged.size) throw new Error('Nenhuma alteração foi preparada para revisão.');
@@ -131,14 +133,70 @@ export class WorkspaceTools {
     }
   }
 
-  private activeFile(): unknown {
-    const editor = vscode.window.activeTextEditor;
-    return editor ? { filePath: vscode.workspace.asRelativePath(editor.document.uri, true), language: editor.document.languageId } : { filePath: null };
+  private workspaceEditor(): vscode.TextEditor | undefined {
+    const editors = [
+      vscode.window.activeTextEditor,
+      ...vscode.window.visibleTextEditors
+    ];
+
+    return editors.find((editor): editor is vscode.TextEditor => {
+      if (!editor || editor.document.uri.scheme !== 'file') {
+        return false;
+      }
+
+      if (!this.workspaceRoot) {
+        return true;
+      }
+
+      const relative = path.relative(
+        this.workspaceRoot,
+        editor.document.uri.fsPath
+      );
+
+      return (
+        relative !== '' &&
+        relative !== '..' &&
+        !relative.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(relative)
+      );
+    });
   }
+
+  private activeFile(): unknown {
+    const editor = this.workspaceEditor();
+
+    if (!editor) {
+      return { filePath: null };
+    }
+
+    return {
+      filePath: vscode.workspace.asRelativePath(
+        editor.document.uri,
+        false
+      ),
+      language: editor.document.languageId
+    };
+  }
+
   private selection(): unknown {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) return { filePath: null, text: '' };
-    return { filePath: vscode.workspace.asRelativePath(editor.document.uri, true), text: editor.document.getText(editor.selection), startLine: editor.selection.start.line + 1, endLine: editor.selection.end.line + 1 };
+    const editor = this.workspaceEditor();
+
+    if (!editor) {
+      return {
+        filePath: null,
+        text: ''
+      };
+    }
+
+    return {
+      filePath: vscode.workspace.asRelativePath(
+        editor.document.uri,
+        false
+      ),
+      text: editor.document.getText(editor.selection),
+      startLine: editor.selection.start.line + 1,
+      endLine: editor.selection.end.line + 1
+    };
   }
   private async listFiles(pattern: string): Promise<unknown> {
     const uris = await vscode.workspace.findFiles(pattern || DEFAULT_GLOB, EXCLUDE, 300);
@@ -239,6 +297,19 @@ export class WorkspaceTools {
     if (!existedExpected && (existsOnDisk || previous)) throw new Error(`O arquivo já existe ou já foi preparado: ${relative}. Use apply_edit para modificá-lo.`);
     const existed = previous?.existed ?? existsOnDisk;
     const original = previous?.original ?? (existsOnDisk ? await fsp.readFile(absolute, 'utf8') : '');
+    // OFFGRID_AGENTS_MD_VALIDATION: valida regras estruturadas antes da revisão.
+    const projectValidation = await validateContentAgainstProjectInstructions({
+      workspaceRoot: this.workspaceRoot,
+      filePath: relative,
+      content
+    });
+    if (projectValidation.instructions.files.length) {
+      this.logger.debug('agent', `[AGENTS.md] Validando ${relative} com ${projectValidation.instructions.files.map(file => file.filePath).join(' → ')}.`);
+    }
+    if (projectValidation.violations.length) {
+      const details = projectValidation.violations.map(item => `- ${item.line ? `linha ${item.line}: ` : ''}${item.message}`).join('\n');
+      throw new Error(`Alteração bloqueada pelas regras do AGENTS.md em ${relative}:\n${details}`);
+    }
     const approved = previous
       ? true
       : existed
@@ -259,6 +330,15 @@ export class WorkspaceTools {
     if (!approved) throw new Error('Exclusão rejeitada pelo usuário.');
     this.staged.set(relative, { content: '', original, existed: true, delete: true });
     return { staged: true, delete: true, filePath: relative };
+  }
+  private async renameFile(filePath: string, newPath: string): Promise<unknown> {
+    const from = normalizeRelativePath(filePath);
+    const to = normalizeRelativePath(newPath);
+    if (from === to) throw new Error('O novo caminho é igual ao atual.');
+    const content = await this.currentContent(from);
+    await this.stageFile(to, content, false, `Renomeado de ${from}`);
+    await this.stageDelete(from, `Renomeado para ${to}`);
+    return { staged: true, renamed: true, from, to };
   }
   private async runTerminal(command: string): Promise<unknown> {
     this.requireWorkspace();

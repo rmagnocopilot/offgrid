@@ -27,6 +27,7 @@ export async function buildAgentWorkspaceContext(params: {
   maxFiles?: number;
   maxCharsPerFile?: number;
   maxTotalChars?: number;
+  includeTestRelated?: boolean;
 }): Promise<AgentWorkspaceContext> {
   const root = params.workspaceRoot;
   if (!root) return { files: [], text: '' };
@@ -39,6 +40,7 @@ export async function buildAgentWorkspaceContext(params: {
   const maxTotalChars = clamp(requestedTotal, 128, 120_000);
   const queued: Array<{ filePath: string; reason: string; depth: number }> = [];
   const queuedKeys = new Set<string>();
+  const resolvedReferences = new Map<string, string | undefined>();
   const files: AgentContextFile[] = [];
   let totalChars = 0;
 
@@ -46,12 +48,17 @@ export async function buildAgentWorkspaceContext(params: {
     if (!value) return;
     const withoutSelection = value.split('#')[0];
     if (!withoutSelection) return;
-    let relative: string;
-    try { relative = normalizeRelativePath(withoutSelection); } catch { return; }
+    let requested: string;
+    try { requested = normalizeRelativePath(withoutSelection); } catch { return; }
+    const referenceKey = requested.toLowerCase();
+    let relative = resolvedReferences.get(referenceKey);
+    if (!resolvedReferences.has(referenceKey)) {
+      relative = resolveContextReference(root, requested);
+      resolvedReferences.set(referenceKey, relative);
+    }
+    if (!relative) return;
     const key = relative.toLowerCase();
     if (queuedKeys.has(key)) return;
-    const absolute = resolveInsideRoot(root, relative);
-    if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) return;
     if (!TEXT_EXTENSIONS.has(path.extname(relative).toLowerCase())) return;
     queuedKeys.add(key);
     queued.push({ filePath: relative, reason, depth });
@@ -77,6 +84,12 @@ export async function buildAgentWorkspaceContext(params: {
       : content;
     files.push({ filePath: candidate.filePath, reason: candidate.reason, content: selected, truncated });
     totalChars += selected.length;
+
+    if (params.includeTestRelated && candidate.depth === 0) {
+      for (const related of discoverTestCreationFiles(root, candidate.filePath, content)) {
+        enqueue(related.filePath, related.reason, 1);
+      }
+    }
 
     // O modelo usa read_file para buscar arquivos adicionais quando a tarefa exigir.
   }
@@ -107,6 +120,151 @@ export async function buildAgentWorkspaceContext(params: {
 
   return { files, text };
 }
+
+
+function resolveContextReference(root: string, requested: string): string | undefined {
+  try {
+    const absolute = resolveInsideRoot(root, requested);
+    if (fs.existsSync(absolute) && fs.statSync(absolute).isFile()) return requested;
+  } catch { /* tenta resolver referência abreviada */ }
+
+  const normalizedRequested = requested.replace(/\\/g, '/');
+  const requestedLower = normalizedRequested.toLowerCase();
+  const requestedBase = path.posix.basename(normalizedRequested).toLowerCase();
+  if (!requestedBase) return undefined;
+
+  const ignored = new Set(['.git', 'node_modules', 'out', 'dist', 'build', 'coverage', '.vscode-test']);
+  const stack = [root];
+  const matches: string[] = [];
+  let visited = 0;
+
+  while (stack.length && visited < 20_000 && matches.length < 20) {
+    const directory = stack.pop();
+    if (!directory) break;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+
+    for (const entry of entries) {
+      visited += 1;
+      if (visited >= 20_000) break;
+      if (entry.isDirectory()) {
+        if (!ignored.has(entry.name)) stack.push(path.join(directory, entry.name));
+        continue;
+      }
+      if (!entry.isFile() || entry.name.toLowerCase() !== requestedBase) continue;
+      const relative = path.relative(root, path.join(directory, entry.name)).replace(/\\/g, '/');
+      const lower = relative.toLowerCase();
+      if (!requestedLower.includes('/') || lower.endsWith(requestedLower)) matches.push(relative);
+    }
+  }
+
+  return matches.sort((left, right) => left.length - right.length || left.localeCompare(right))[0];
+}
+
+
+function discoverTestCreationFiles(root: string, relative: string, content: string): Array<{ filePath: string; reason: string }> {
+  const results: Array<{ filePath: string; reason: string }> = [];
+  const seen = new Set<string>();
+  const add = (candidate: string | undefined, reason: string): void => {
+    if (!candidate) return;
+    const normalized = candidate.replace(/\\/g, '/');
+    const key = normalized.toLowerCase();
+    if (seen.has(key) || key === relative.replace(/\\/g, '/').toLowerCase()) return;
+    seen.add(key);
+    results.push({ filePath: normalized, reason });
+  };
+
+  if (/\.java$/i.test(relative)) {
+    for (const match of content.matchAll(/\bimport\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*;/g)) {
+      const qualifiedName = match[1];
+      if (!qualifiedName || qualifiedName.startsWith('java.') || qualifiedName.startsWith('javax.') || qualifiedName.startsWith('jakarta.')) continue;
+      add(resolveJavaImportFile(root, relative, qualifiedName), 'classe Java usada pelo arquivo de origem');
+    }
+    add(findNearestPomFile(root, relative), 'dependências Maven do módulo');
+    add(findNearestTestFile(root, relative), 'padrão de teste Java existente no módulo');
+    return results;
+  }
+
+  for (const match of content.matchAll(/\bfrom\s+['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+    const specifier = match[1] ?? match[2];
+    if (!specifier?.startsWith('.')) continue;
+    const resolved = resolveImportFile(root, relative, specifier);
+    if (resolved) add(resolved, /service/i.test(resolved) ? 'service usado pelo componente' : 'modelo ou dependência usada pelo componente');
+  }
+
+  add(findNearestTestFile(root, relative), 'padrão de teste existente no projeto');
+  return results;
+}
+
+function findNearestTestFile(root: string, relative: string): string | undefined {
+  const ignored = new Set(['.git', 'node_modules', 'out', 'dist', 'build', 'coverage', '.vscode-test', 'target']);
+  const normalizedSource = relative.replace(/\\/g, '/');
+  const sourceParts = path.posix.dirname(normalizedSource).split('/');
+  const javaSource = /\.java$/i.test(normalizedSource);
+  const sourceModule = normalizedSource.split('/src/')[0] ?? '';
+  const candidates: Array<{ filePath: string; score: number }> = [];
+  const stack = [root];
+  let visited = 0;
+
+  while (stack.length && visited < 20_000 && candidates.length < 50) {
+    const directory = stack.pop();
+    if (!directory) break;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      visited += 1;
+      if (visited >= 20_000) break;
+      if (entry.isDirectory()) {
+        if (!ignored.has(entry.name)) stack.push(path.join(directory, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (javaSource ? !/(?:Test|Tests)\.java$/i.test(entry.name) : !/\.(?:spec|test)\.(?:ts|tsx|js|jsx)$/i.test(entry.name)) continue;
+
+      const filePath = path.relative(root, path.join(directory, entry.name)).replace(/\\/g, '/');
+      if (javaSource && sourceModule && !filePath.startsWith(`${sourceModule}/`)) continue;
+      const parts = path.posix.dirname(filePath).split('/');
+      let common = 0;
+      while (common < sourceParts.length && common < parts.length && sourceParts[common] === parts[common]) common += 1;
+      candidates.push({ filePath, score: common * 1000 - filePath.length });
+    }
+  }
+
+  return candidates.sort((left, right) => right.score - left.score)[0]?.filePath;
+}
+
+function findNearestPomFile(root: string, relative: string): string | undefined {
+  const normalized = relative.replace(/\\/g, '/');
+  const sourceMarker = normalized.indexOf('/src/');
+  const modulePrefix = sourceMarker >= 0 ? normalized.slice(0, sourceMarker) : path.posix.dirname(normalized);
+  const candidates = [
+    path.posix.join(modulePrefix, 'pom.xml'),
+    'pom.xml'
+  ];
+  for (const candidate of candidates) {
+    try {
+      const safe = normalizeRelativePath(candidate);
+      const absolute = resolveInsideRoot(root, safe);
+      if (fs.existsSync(absolute) && fs.statSync(absolute).isFile()) return safe;
+    } catch { /* próximo candidato */ }
+  }
+  return undefined;
+}
+
+function resolveJavaImportFile(root: string, fromFile: string, qualifiedName: string): string | undefined {
+  const normalized = fromFile.replace(/\\/g, '/');
+  const marker = normalized.toLowerCase().indexOf('/src/main/java/');
+  if (marker < 0) return undefined;
+  const modulePrefix = normalized.slice(0, marker);
+  const candidate = path.posix.join(modulePrefix, 'src/main/java', `${qualifiedName.replace(/\./g, '/')}.java`);
+  try {
+    const safe = normalizeRelativePath(candidate);
+    const absolute = resolveInsideRoot(root, safe);
+    if (fs.existsSync(absolute) && fs.statSync(absolute).isFile()) return safe;
+  } catch { /* import externo ou inválido */ }
+  return undefined;
+}
+
 
 function discoverRelatedFiles(root: string, relative: string, content: string): Array<{ filePath: string; reason: string }> {
   const results: Array<{ filePath: string; reason: string }> = [];

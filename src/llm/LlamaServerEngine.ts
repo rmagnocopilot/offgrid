@@ -140,7 +140,7 @@ export class LlamaServerEngine {
       // Encerra servidor anterior se existir
       await this.stopServer('nova carga');
 
-      this.chatSystemPrompt = systemPrompt;
+      this.chatSystemPrompt = this.withPromptMode(systemPrompt, options.promptMode);
       this.chatHistory = [];
       this.agentActive = false;
       this.agentSystemPrompt = '';
@@ -213,7 +213,9 @@ export class LlamaServerEngine {
       '--ctx-size', String(options.contextSize),
       '--n-predict', String(options.maxTokens),
       '--threads', String(Math.max(1, require('os').cpus().length - 1)),
+      '--parallel', '1',
       '--no-mmap',       // evita mmap para não competir com RAM do sistema
+      
     ];
 
     // GPU
@@ -337,7 +339,7 @@ export class LlamaServerEngine {
   async startAgent(systemPrompt: string): Promise<void> {
     await this.enqueue(async () => {
       this.ensureLoaded();
-      this.agentSystemPrompt = systemPrompt;
+      this.agentSystemPrompt = this.withPromptMode(systemPrompt, this.options?.promptMode);
       this.agentActive = true;
       this.chatHistory = []; // histórico limpo para nova sessão do agente
       this.log('debug', [
@@ -366,13 +368,12 @@ export class LlamaServerEngine {
         ? this.agentSystemPrompt
         : this.chatSystemPrompt;
 
-      // No primeiro step, o histórico já foi limpo por startAgent.
-      // Nos steps seguintes, o histórico acumula os turns do agente.
-      this.chatHistory.push({ role: 'user', content: text });
-
+      // O AgentLoop já constrói cada prompt com todo o contexto necessário
+      // (resultado da ferramenta anterior via resultPrompt). Não acumulamos
+      // histórico entre steps para evitar estourar o contexto do modelo.
       const messages: ChatMessage[] = [
         { role: 'system', content: activeSystemPrompt },
-        ...this.chatHistory
+        { role: 'user', content: text }
       ];
 
       const maxTokens = Math.max(
@@ -401,11 +402,9 @@ export class LlamaServerEngine {
           onChunk: options.onChunk
         });
 
-        this.chatHistory.push({ role: 'assistant', content: response });
         this.log('debug', `[Agent][Prompt] Concluído em ${Date.now() - started} ms; resposta=${response.length} chars.`);
         return response;
       } catch (error) {
-        this.chatHistory.pop();
         const elapsed = Date.now() - started;
         if (options.signal?.aborted || (error as Error)?.name === 'AbortError') {
           this.log('info', `[Abort][4/4] Sinal recebido pelo LlamaServerEngine. tempo=${elapsed}ms`);
@@ -574,6 +573,11 @@ export class LlamaServerEngine {
   }
 
   // ─── Utilitários ─────────────────────────────────────────────────────────
+
+  private withPromptMode(systemPrompt: string, promptMode: EngineLoadOptions['promptMode']): string {
+    if (promptMode !== 'no-think') return systemPrompt;
+    return systemPrompt.includes('/no_think') ? systemPrompt : `${systemPrompt}\n\n/no_think`;
+  }
 
   private ensureLoaded(): void {
     if (!this.isLoaded) throw new Error('Nenhum modelo carregado.');

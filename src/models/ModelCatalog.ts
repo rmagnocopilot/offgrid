@@ -92,6 +92,19 @@ function validateManifest(value: unknown, manifestPath: string): Manifest {
     }
     if (path.basename(model.fileName) !== model.fileName) throw new Error(`Nome de arquivo de modelo inválido: ${model.fileName}`);
     if (!/^[a-f0-9]{64}$/i.test(model.sha256)) throw new Error(`SHA-256 inválido para ${model.id}.`);
+    if (model.parameterCountB !== undefined && (!Number.isFinite(model.parameterCountB) || model.parameterCountB <= 0)) {
+      throw new Error(`Quantidade de parâmetros inválida para ${model.id}.`);
+    }
+    if (model.promptMode !== undefined && !['default', 'no-think'].includes(model.promptMode)) {
+      throw new Error(`Modo de prompt inválido para ${model.id}.`);
+    }
+    if (model.contextProfile) {
+      const values = [model.contextProfile.minimum, model.contextProfile.base, model.contextProfile.complex, model.contextProfile.maximum];
+      if (values.some(item => !Number.isInteger(item) || item < 2_048)
+        || !(values[0]! <= values[1]! && values[1]! <= values[2]! && values[2]! <= values[3]!)) {
+        throw new Error(`Perfil de contexto inválido para ${model.id}.`);
+      }
+    }
     if (ids.has(model.id)) throw new Error(`ID de modelo duplicado: ${model.id}`);
     if (files.has(model.fileName.toLowerCase())) throw new Error(`Arquivo de modelo duplicado: ${model.fileName}`);
     ids.add(model.id);

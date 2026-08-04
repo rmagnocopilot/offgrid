@@ -14,7 +14,32 @@ import { ChatViewProvider, type UiEvent } from './ui/ChatViewProvider';
 import { ChangePreviewProvider } from './ui/ChangePreviewProvider';
 import { ContextManager } from './context/ContextManager';
 import { buildTemporalContext } from './context/TemporalContext';
+import { loadProjectInstructions } from './context/ProjectInstructions';
 import { buildAgentWorkspaceContext } from './agent/WorkspaceContextBuilder';
+import {
+  contextFallbacks, estimateRequiredBytes, estimateTaskComplexity, formatContextPlan, planContext, shouldExpandContext,
+  type ContextMode, type ContextPlan, type ContextTaskEstimate
+} from './context/AutomaticContextPlanner';
+import { isDeviceMemoryError } from './llm/LlamaServerEngine';
+import { tryPrepareSimpleEditFastPath } from './agent/SimpleEditFastPath';
+import { tryPrepareStructuralEditFastPath } from './agent/StructuralEditFastPath';
+import { tryPrepareDocumentationFastPath } from './agent/DocumentationFastPath';
+import { tryPrepareTestGenerationFastPath } from './agent/TestGenerationFastPath';
+import { tryPrepareJavaUnitTestFastPath } from './agent/JavaUnitTestFastPath';
+import { tryPrepareBackendEndpointFastPath } from './agent/BackendEndpointFastPath';
+import { tryPrepareBackendServiceFastPath } from './agent/BackendServiceFastPath';
+import { tryPrepareFrontendCrudFastPath } from './agent/FrontendCrudFastPath';
+import { tryPrepareFullStackFlowFastPath } from './agent/FullStackFlowFastPath';
+import { tryPrepareFullStackRelationRefactorFastPath } from './agent/FullStackRelationRefactorFastPath';
+import {
+  analyzeBackendEndpointIntent, endpointTaskGuidance, existingEndpointResponse
+} from './agent/BackendEndpointIntent';
+import { analyzeBackendServiceIntent, serviceTaskGuidance } from './agent/BackendServiceIntent';
+import { interpretLayeredTask } from './agent/LayeredTaskIntent';
+import { analyzeFrontendCrudIntent, frontendCrudTaskGuidance } from './agent/FrontendCrudIntent';
+import { analyzeFullStackFlowIntent, fullStackFlowTaskGuidance } from './agent/FullStackFlowIntent';
+import { analyzeFullStackRelationRefactorIntent } from './agent/FullStackRelationRefactorIntent';
+import { agentOutputTokenFloor, generatedFileContentIssue, isFileCreationTask } from './agent/AgentTaskPolicy';
 import { schemasForMode, validateToolArguments } from './tools/ToolRegistry';
 import type {
   AgentAutonomy, ApprovalMode, ConversationMode, DiagnosticsPanelMode, EngineDiagnostics, EngineLoadOptions,
@@ -269,6 +294,11 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
   try {
     let response = '';
     if (mode === 'chat') {
+      const chatPriority = s.contextManager.priority(text);
+      await ensureAutomaticContextForTask(s, estimateTaskComplexity({
+        request: text,
+        estimatedFiles: Math.max(1, chatPriority.length)
+      }));
       const prompt = await buildChatPrompt(s, text);
       response = await s.engine.prompt(prompt, { signal: controller.signal, onChunk: chunk => void s.view.streamChunk(messageId, chunk) });
     } else {
@@ -286,26 +316,383 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         .getConfiguration('offgrid')
         .get<ApprovalMode>('agentApprovalMode', 'ask');
 
-      const schemas = schemasForMode(
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const initialPriority = s.contextManager.priority(text);
+      const layeredTask = interpretLayeredTask(text);
+      s.logger.info(
+        'agent',
+        [
+          '[TaskIntent] Pedido interpretado.',
+          `alvo=${layeredTask.targetLayer}`,
+          `referências=${layeredTask.referenceLayers.join(',') || 'nenhuma'}`,
+          `operação=${layeredTask.operation}`,
+          `linguagem=${layeredTask.language}`,
+          `confiança=${layeredTask.confidence}`,
+          `ambíguo=${layeredTask.ambiguous}`
+        ].join(' ')
+      );
+      const fullStackRelationRefactorAnalysis = mode === 'agent'
+        ? await analyzeFullStackRelationRefactorIntent({
+            request: text,
+            workspaceRoot,
+            priority: initialPriority,
+            info: message => s.logger.info('agent', message),
+            warn: message => s.logger.warn('agent', message)
+          })
+        : undefined;
+      const fullStackFlowAnalysis = mode === 'agent' && !fullStackRelationRefactorAnalysis
+        ? await analyzeFullStackFlowIntent({
+            request: text,
+            workspaceRoot,
+            priority: initialPriority,
+            info: message => s.logger.info('agent', message),
+            warn: message => s.logger.warn('agent', message)
+          })
+        : undefined;
+      const frontendCrudAnalysis = mode === 'agent' && !fullStackFlowAnalysis && !fullStackRelationRefactorAnalysis
+        ? await analyzeFrontendCrudIntent({
+            request: text,
+            workspaceRoot,
+            priority: initialPriority,
+            info: message => s.logger.info('agent', message),
+            warn: message => s.logger.warn('agent', message)
+          })
+        : undefined;
+      const backendServiceAnalysis = mode === 'agent' && !frontendCrudAnalysis && !fullStackFlowAnalysis && !fullStackRelationRefactorAnalysis
+        ? await analyzeBackendServiceIntent({
+            request: text,
+            workspaceRoot,
+            priority: initialPriority,
+            info: message => s.logger.info('agent', message),
+            warn: message => s.logger.warn('agent', message)
+          })
+        : undefined;
+      const backendEndpointAnalysis = mode === 'agent' && !frontendCrudAnalysis && !backendServiceAnalysis && !fullStackFlowAnalysis && !fullStackRelationRefactorAnalysis
+        ? await analyzeBackendEndpointIntent({
+            request: text,
+            workspaceRoot,
+            priority: initialPriority,
+            info: message => s.logger.info('agent', message),
+            warn: message => s.logger.warn('agent', message)
+          })
+        : undefined;
+      const priority = fullStackRelationRefactorAnalysis?.priority.length
+        ? fullStackRelationRefactorAnalysis.priority
+        : fullStackFlowAnalysis?.priority.length
+        ? fullStackFlowAnalysis.priority
+        : frontendCrudAnalysis?.priority.length
+          ? frontendCrudAnalysis.priority
+          : backendServiceAnalysis?.priority.length
+          ? backendServiceAnalysis.priority
+          : backendEndpointAnalysis?.priority.length
+            ? backendEndpointAnalysis.priority
+            : initialPriority;
+
+      const allSchemas = schemasForMode(
         approvalMode === 'readOnly' ? 'readOnly' : mode
       );
+      const fileCreationTask = mode === 'agent' && isFileCreationTask(text);
+      const genericFileCreationTask = fileCreationTask && !frontendCrudAnalysis && !backendServiceAnalysis && !backendEndpointAnalysis && !fullStackFlowAnalysis && !fullStackRelationRefactorAnalysis;
+      const fileCreationTools = new Set([
+        'get_active_file',
+        'list_files',
+        'read_file',
+        'create_file',
+        'apply_changes'
+      ]);
+      const backendEndpointTools = new Set([
+        'list_files',
+        'list_directory_tree',
+        'read_file',
+        'search_codebase',
+        'apply_edit',
+        'apply_changes'
+      ]);
+      const backendServiceTools = new Set([
+        'list_files',
+        'read_file',
+        'search_codebase',
+        'apply_edit',
+        'apply_changes'
+      ]);
+      const fullStackRelationRefactorTools = new Set([
+        'list_files',
+        'read_file',
+        'search_codebase',
+        'apply_edit',
+        'apply_changes'
+      ]);
+      const fullStackFlowTools = new Set([
+        'list_files',
+        'list_directory_tree',
+        'read_file',
+        'search_codebase',
+        'create_file',
+        'apply_edit',
+        'apply_changes'
+      ]);
+      const frontendCrudTools = new Set([
+        'list_files',
+        'read_file',
+        'search_codebase',
+        'apply_edit',
+        'apply_changes'
+      ]);
+      if (!backendEndpointAnalysis?.resourceFile) backendEndpointTools.add('create_file');
+      const schemas = frontendCrudAnalysis
+        ? allSchemas.filter(schema => frontendCrudTools.has(schema.name))
+        : backendServiceAnalysis
+          ? allSchemas.filter(schema => backendServiceTools.has(schema.name))
+          : backendEndpointAnalysis
+            ? allSchemas.filter(schema => backendEndpointTools.has(schema.name))
+            : genericFileCreationTask
+              ? allSchemas.filter(schema => fileCreationTools.has(schema.name))
+              : allSchemas;
+      const selectedSchemas = fullStackRelationRefactorAnalysis
+        ? allSchemas.filter(schema => fullStackRelationRefactorTools.has(schema.name))
+        : fullStackFlowAnalysis
+        ? allSchemas.filter(schema => fullStackFlowTools.has(schema.name))
+        : schemas;
 
       s.logger.debug(
         'agent',
-        `[Flow][1/6] Catálogo preparado. ferramentas=${schemas.length}; aprovação=${approvalMode}.`
+        `[Flow][1/6] Catálogo preparado. ferramentas=${selectedSchemas.length}; autonomia=${s.autonomy}; segurança=${approvalMode}.`
       );
+
+      if (backendEndpointAnalysis?.existingEndpoint) {
+        response = existingEndpointResponse(backendEndpointAnalysis.existingEndpoint);
+        await s.view.streamChunk(messageId, response);
+        s.sessions.addMessage({ role: 'assistant', text: response });
+        s.sessions.updateMetadata({
+          lastError: undefined,
+          backend: s.engine.diagnostics.backend
+        });
+        return;
+      }
+
+      if (mode === 'agent' && approvalMode !== 'readOnly') {
+        const fullStackRelationRefactorFastPath = await tryPrepareFullStackRelationRefactorFastPath({
+          request: text,
+          workspaceRoot,
+          analysis: fullStackRelationRefactorAnalysis,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (fullStackRelationRefactorFastPath) {
+          response = fullStackRelationRefactorFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: fullStackRelationRefactorFastPath.complete ? undefined : response,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const fullStackFlowFastPath = await tryPrepareFullStackFlowFastPath({
+          request: text,
+          workspaceRoot,
+          analysis: fullStackFlowAnalysis,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (fullStackFlowFastPath) {
+          response = fullStackFlowFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: fullStackFlowFastPath.complete ? undefined : response,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const frontendCrudFastPath = await tryPrepareFrontendCrudFastPath({
+          request: text,
+          workspaceRoot,
+          analysis: frontendCrudAnalysis,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (frontendCrudFastPath) {
+          response = frontendCrudFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: undefined,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const backendServiceFastPath = await tryPrepareBackendServiceFastPath({
+          request: text,
+          workspaceRoot,
+          analysis: backendServiceAnalysis,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (backendServiceFastPath) {
+          response = backendServiceFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: undefined,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const backendEndpointFastPath = await tryPrepareBackendEndpointFastPath({
+          request: text,
+          workspaceRoot,
+          analysis: backendEndpointAnalysis,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (backendEndpointFastPath) {
+          response = backendEndpointFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: undefined,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const javaTestFastPath = await tryPrepareJavaUnitTestFastPath({
+          request: text,
+          workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          priority,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (javaTestFastPath) {
+          response = javaTestFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: undefined,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const testFastPath = await tryPrepareTestGenerationFastPath({
+          request: text,
+          workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          priority,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (testFastPath) {
+          response = testFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: undefined,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const documentationFastPath = await tryPrepareDocumentationFastPath({
+          request: text,
+          workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          priority,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (documentationFastPath) {
+          response = documentationFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: undefined,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const structuralFastPath = await tryPrepareStructuralEditFastPath({
+          request: text,
+          workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          priority,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (structuralFastPath) {
+          response = structuralFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: undefined,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const fastPath = await tryPrepareSimpleEditFastPath({
+          request: text,
+          workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          priority,
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (fastPath) {
+          response = fastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: undefined,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+      }
+
+      const taskContextEstimate = estimateTaskComplexity({
+        request: text,
+        estimatedFiles: Math.max(1, priority.length),
+        fullStack: Boolean(fullStackFlowAnalysis || fullStackRelationRefactorAnalysis),
+        multiLayer: Boolean(frontendCrudAnalysis || backendServiceAnalysis || backendEndpointAnalysis),
+        createsFiles: genericFileCreationTask
+      });
+      await ensureAutomaticContextForTask(s, taskContextEstimate);
 
       const contextSize = s.engine.diagnostics.contextSize ?? 4096;
       const configuredMaxTokens = vscode.workspace
         .getConfiguration('offgrid')
         .get<number>('maxTokens', 1024);
+      const minimumOutputTokens = agentOutputTokenFloor(text);
 
       if (contextSize < 2_048) {
         throw Object.assign(
           new Error(
             [
               `O Modo Agente requer contexto de pelo menos 2048 tokens; o modelo foi carregado com ${contextSize}.`,
-              'Configure offgrid.contextSize como 4096 e recarregue o modelo.'
+              'Use o contexto automático ou configure offgrid.contextSize como 4096 no modo manual e recarregue o modelo.'
             ].join(' ')
           ),
           { name: 'AgentContextError' }
@@ -318,11 +705,7 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         ? s.catalog.list().find(item => item.id === s.activeModelId)
         : undefined;
       const modelFileSizeBytes = activeModelStatus?.fileSize ?? 0;
-      const GB = 1024 ** 3;
-      const modelTier: 'small' | 'medium' | 'large' =
-        modelFileSizeBytes > 3 * GB ? 'large'
-          : modelFileSizeBytes > 1 * GB ? 'medium'
-            : 'small';
+      const modelTier = detectModelTier(modelFileSizeBytes);
 
       const systemPromptStartedAt = Date.now();
 
@@ -331,13 +714,25 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         `[Flow][2/6] Iniciando montagem do prompt de sistema. modelTier=${modelTier}`
       );
 
-      const agentSystem = await buildAgentSystemPrompt(
+      const baseAgentSystem = await buildAgentSystemPrompt(
         s,
-        schemas,
+        selectedSchemas,
         mode,
         text,
-        modelTier
+        modelTier,
+        priority
       );
+      // OFFGRID_AGENTS_MD_AGENT: mantém as regras no prompt de sistema.
+      const agentInstructionContext = await loadProjectInstructions({
+        workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+        targetFiles: s.contextManager.priority(text)
+      });
+      if (agentInstructionContext.files.length) {
+        s.logger.debug('agent', `[AGENTS.md] Agente: ${agentInstructionContext.files.map(file => file.filePath).join(' → ')}`);
+      }
+      const agentSystem = [baseAgentSystem, agentInstructionContext.text]
+        .filter(Boolean)
+        .join('\n\n');
 
       s.logger.debug(
         'agent',
@@ -350,10 +745,13 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         configuredMaxTokens,
         systemPromptChars: agentSystem.length,
         taskChars: taskEnvelope.length,
-        modelFileSizeBytes
+        modelFileSizeBytes,
+        minimumOutputTokens
       });
-      const priority = s.contextManager.priority(text);
       const contextStartedAt = Date.now();
+      const effectiveMaxFiles = taskContextEstimate.complexity === 'simple'
+        ? 1
+        : budget.maxFiles;
 
       s.logger.info(
         'agent',
@@ -361,19 +759,21 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
           '[Flow][3/6] Iniciando análise automática do workspace.',
           `prioridade=${priority.join(' → ') || 'nenhuma'}`,
           `modelTier=${budget.modelTier}`,
-          `limiteArquivos=${budget.maxFiles}`,
+          `limiteArquivos=${effectiveMaxFiles}`,
           `limiteTotal=${budget.workspaceChars}`,
           `saídaReservada=${budget.maxOutputTokens} tokens`,
+          `mínimoTarefa=${minimumOutputTokens || 'padrão'} tokens`,
           `margem=${budget.safetyTokens} tokens`
         ].join(' ')
       );
 
       const workspaceContext = await buildAgentWorkspaceContext({
-        workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+        workspaceRoot,
         priority,
-        maxFiles: budget.maxFiles,
+        maxFiles: effectiveMaxFiles,
         maxCharsPerFile: budget.maxCharsPerFile,
-        maxTotalChars: budget.workspaceChars
+        maxTotalChars: budget.workspaceChars,
+        includeTestRelated: genericFileCreationTask
       });
 
       const contextCharacters = workspaceContext.files.reduce(
@@ -411,16 +811,52 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
             .getConfiguration('offgrid')
             .get<number>('maxAgentSteps', 10)}.`
         );
+      const configuredAgentSteps = vscode.workspace
+        .getConfiguration('offgrid')
+        .get<number>('maxAgentSteps', 10);
+      const effectiveAgentSteps = genericFileCreationTask
+        ? Math.min(configuredAgentSteps, 4)
+        : configuredAgentSteps;
+
       response = await s.engine.runAgent({
         initialPrompt,
+        taskReminder: taskEnvelope,
         systemPrompt: agentSystem,
-        maxSteps: vscode.workspace.getConfiguration('offgrid').get<number>('maxAgentSteps', 10),
+        maxSteps: effectiveAgentSteps,
         diagnosticMode: vscode.workspace.getConfiguration('offgrid').get<boolean>('diagnosticMode', false),
         maxTokens: budget.maxOutputTokens,
         signal: controller.signal,
         executeTool: call => {
-          const tool = schemas.find(schema => schema.name === call.name);
-          if (!tool) return Promise.resolve({ callId: call.id, name: call.name, ok: false, content: null, error: `Ferramenta indisponível no modo ${mode}.`, durationMs: 0 });
+          const tool = selectedSchemas.find(schema => schema.name === call.name);
+          if (!tool) {
+            const validNames = selectedSchemas.map(schema => schema.name).join(', ');
+            return Promise.resolve({
+              callId: call.id,
+              name: call.name,
+              ok: false,
+              content: null,
+              error: `Ferramenta "${call.name}" não existe. Ferramentas disponíveis no modo ${mode}: ${validNames}.`,
+              durationMs: 0
+            });
+          }
+          if (call.name === 'create_file') {
+            const contentIssue = generatedFileContentIssue(
+              call.arguments.filePath,
+              call.arguments.content,
+              { request: text, sources: workspaceContext.files }
+            );
+            if (contentIssue) {
+              s.logger.warn('agent', `[Tool] create_file rejeitado: ${contentIssue}`);
+              return Promise.resolve({
+                callId: call.id,
+                name: call.name,
+                ok: false,
+                content: null,
+                error: contentIssue,
+                durationMs: 0
+              });
+            }
+          }
           const validationError = validateToolArguments(tool, call.arguments);
           if (validationError) {
             s.logger.warn('agent', `[Tool] Argumentos rejeitados para ${call.name}: ${validationError}`);
@@ -464,7 +900,19 @@ async function mockSubmit(s: Services, text: string, mode: ConversationMode): Pr
   await refreshUi(s);
 }
 
-async function loadModelById(s: Services, modelId: string, force: boolean): Promise<void> {
+interface ModelLoadRequest {
+  contextOverride?: number;
+  taskEstimate?: ContextTaskEstimate;
+  reason?: string;
+  throwOnError?: boolean;
+}
+
+async function loadModelById(
+  s: Services,
+  modelId: string,
+  force: boolean,
+  request: ModelLoadRequest = {}
+): Promise<boolean> {
   let model: ModelDefinition;
   try {
     model = s.catalog.get(modelId);
@@ -472,7 +920,8 @@ async function loadModelById(s: Services, modelId: string, force: boolean): Prom
     const message = error instanceof Error ? error.message : String(error);
     s.logger.error('model', message, error);
     vscode.window.showErrorMessage(message);
-    return;
+    if (request.throwOnError) throw error;
+    return false;
   }
 
   let status = s.catalog.list(modelPathForActive(s), s.engine.diagnostics.modelPath, s.modelErrors)
@@ -481,7 +930,8 @@ async function loadModelById(s: Services, modelId: string, force: boolean): Prom
     const message = `Modelo não encontrado no catálogo: ${modelId}`;
     s.logger.error('model', message);
     vscode.window.showErrorMessage(message);
-    return;
+    if (request.throwOnError) throw new Error(message);
+    return false;
   }
 
   if (!fs.existsSync(status.filePath)) {
@@ -492,7 +942,7 @@ async function loadModelById(s: Services, modelId: string, force: boolean): Prom
     );
     if (choice !== 'Baixar e carregar') {
       await refreshUi(s);
-      return;
+      return false;
     }
 
     s.modelErrors[modelId] = '';
@@ -527,13 +977,16 @@ async function loadModelById(s: Services, modelId: string, force: boolean): Prom
       else if (action === 'Abrir pasta dos modelos') await openOffgridFolder(s, 'models');
       else if (action === 'Abrir logs') await openOffgridFolder(s, 'logs');
       await refreshUi(s);
-      return;
+      if (request.throwOnError) throw error;
+      return false;
     }
   }
 
-  if (!force && s.engine.isLoaded && path.resolve(s.engine.diagnostics.modelPath) === path.resolve(status.filePath)) {
+  const sameModelLoaded = s.engine.isLoaded
+    && path.resolve(s.engine.diagnostics.modelPath) === path.resolve(status.filePath);
+  if (!force && sameModelLoaded && request.contextOverride === undefined) {
     await refreshUi(s);
-    return;
+    return true;
   }
 
   const previous = s.activeModelId;
@@ -545,39 +998,166 @@ async function loadModelById(s: Services, modelId: string, force: boolean): Prom
 
   try {
     const cfg = vscode.workspace.getConfiguration('offgrid');
-    const options: EngineLoadOptions = {
+    const contextPlan = await createContextPlan(s, model, status, request.taskEstimate);
+    const selectedContext = request.contextOverride ?? contextPlan.contextSize;
+    const minimumContext = model.contextProfile?.minimum ?? 4_096;
+    const candidates = contextPlan.mode === 'manual'
+      ? [selectedContext]
+      : request.contextOverride === undefined
+        ? contextPlan.fallbackContexts
+        : contextFallbacks(selectedContext, minimumContext);
+
+    s.logger.info('model', formatContextPlan(
+      { ...contextPlan, contextSize: selectedContext, fallbackContexts: candidates },
+      model.id,
+      sameModelLoaded ? s.engine.diagnostics.contextSize : null
+    ));
+    if (request.reason) s.logger.info('model', `[ContextPlanner] motivo=${request.reason}`);
+
+    const baseOptions: Omit<EngineLoadOptions, 'contextSize'> = {
       modelPath: status.filePath,
       gpu: parseBackend(cfg.get<unknown>('gpu', 'auto')),
       gpuLayers: parseGpuLayers(cfg.get<unknown>('gpuLayers', 'auto')),
-      contextSize: cfg.get<number>('contextSize', 4096),
       maxTokens: cfg.get<number>('maxTokens', 1024),
       temperature: cfg.get<number>('temperature', 0.2),
       fallbackToCpu: cfg.get<boolean>('fallbackToCpu', true),
-      adaptiveGpu: cfg.get<boolean>('adaptiveGpu', true)
+      adaptiveGpu: cfg.get<boolean>('adaptiveGpu', true),
+      promptMode: model.promptMode ?? 'default'
     };
     const prompt = `${await readResource(s.context.extensionUri.fsPath, 'resources/system-prompt.md')}\n\n${buildTemporalContext()}`;
-    s.logger.info('model', `Carregando ${model.displayName}. Caminho=${status.filePath}; backend=${options.gpu}; contexto=${options.contextSize}.`);
-    await s.engine.load(options, prompt);
-    vscode.window.showInformationMessage(`${model.displayName} carregado em ${s.engine.diagnostics.backend.toUpperCase()}.`);
+
+    let lastError: unknown;
+    for (let index = 0; index < candidates.length; index += 1) {
+      const contextSize = candidates[index]!;
+      const options: EngineLoadOptions = { ...baseOptions, contextSize };
+      try {
+        s.logger.info(
+          'model',
+          `Carregando ${model.displayName}. Caminho=${status.filePath}; backend=${options.gpu}; contexto=${contextSize}; promptMode=${options.promptMode}.`
+        );
+        await s.engine.load(options, prompt);
+        if (index > 0) {
+          s.logger.warn('model', `[ContextPlanner] Carga concluída com fallback de contexto=${contextSize}.`);
+        }
+        vscode.window.setStatusBarMessage(
+          `${model.displayName} carregado em ${s.engine.diagnostics.backend.toUpperCase()} · contexto ${contextSize}.`,
+          2000);
+        return true;
+      } catch (error) {
+        lastError = error;
+        const next = candidates[index + 1];
+        if (next === undefined || !isContextCapacityError(error)) throw error;
+        s.logger.warn(
+          'model',
+          `[ContextPlanner] Falha de memória com contexto=${contextSize}; tentando ${next}.`,
+          error
+        );
+      }
+    }
+    throw lastError ?? new Error('Não foi possível carregar o modelo.');
   } catch (error) {
     const message = friendlyModelError(error, model.displayName);
     s.modelErrors[modelId] = message;
 
-    // Um modelo só pode permanecer ativo quando o motor realmente continua
-    // carregado. Em uma falha de carga, o EngineClient marca loaded=false;
-    // portanto não devemos restaurar uma seleção antiga e exibi-la como ativa.
     const restoredModelId = s.engine.isLoaded ? previous : undefined;
     s.activeModelId = restoredModelId;
     await s.context.globalState.update('offgrid.activeModelId', restoredModelId);
     s.logger.error('model', message, error);
+    if (request.throwOnError) throw error;
     const action = await vscode.window.showErrorMessage(message, 'Abrir Output', 'Abrir logs', 'Abrir pasta dos modelos');
     if (action === 'Abrir Output') s.output.show(true);
     else if (action === 'Abrir logs') await openOffgridFolder(s, 'logs');
     else if (action === 'Abrir pasta dos modelos') await openOffgridFolder(s, 'models');
+    return false;
   } finally {
     s.pendingLoadModelId = undefined;
     await refreshUi(s);
   }
+}
+
+async function createContextPlan(
+  s: Services,
+  model: ModelDefinition,
+  status: ModelStatus,
+  task?: ContextTaskEstimate
+): Promise<ContextPlan> {
+  const cfg = vscode.workspace.getConfiguration('offgrid');
+  const mode = parseContextMode(cfg.get<unknown>('contextMode', 'automatic'));
+  const resources = await s.engine.refreshResources(true, true);
+
+  let reclaimableBytes = 0;
+  if (s.engine.isLoaded && s.engine.diagnostics.contextSize) {
+    const loadedStatus = s.catalog.list('', s.engine.diagnostics.modelPath, s.modelErrors)
+      .find(item => item.state === 'loaded');
+    if (loadedStatus) {
+      reclaimableBytes = estimateRequiredBytes(
+        loadedStatus,
+        loadedStatus.fileSize,
+        s.engine.diagnostics.contextSize
+      );
+    }
+  }
+
+  return planContext({
+    mode,
+    manualContextSize: cfg.get<number>('contextSize', 4_096),
+    model,
+    modelFileSizeBytes: status.fileSize,
+    resources,
+    currentContextSize: s.engine.diagnostics.contextSize,
+    reclaimableBytes,
+    task
+  });
+}
+
+async function ensureAutomaticContextForTask(
+  s: Services,
+  task: ContextTaskEstimate
+): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration('offgrid');
+  if (parseContextMode(cfg.get<unknown>('contextMode', 'automatic')) !== 'automatic') return;
+  if (!s.activeModelId || !s.engine.isLoaded) return;
+
+  const model = s.catalog.get(s.activeModelId);
+  const status = s.catalog.list(modelPathForActive(s), s.engine.diagnostics.modelPath, s.modelErrors)
+    .find(item => item.id === s.activeModelId);
+  if (!status) return;
+
+  const plan = await createContextPlan(s, model, status, task);
+  s.logger.info('agent', formatContextPlan(plan, model.id, s.engine.diagnostics.contextSize));
+  if (!shouldExpandContext(s.engine.diagnostics.contextSize, plan)) return;
+
+  s.logger.info(
+    'agent',
+    `[ContextPlanner] Ampliando contexto antes da geração: ${s.engine.diagnostics.contextSize} → ${plan.contextSize}.`
+  );
+  const loaded = await loadModelById(s, model.id, true, {
+    contextOverride: plan.contextSize,
+    taskEstimate: task,
+    reason: `tarefa ${task.complexity} com ${task.estimatedFiles} arquivos estimados`,
+    throwOnError: true
+  });
+  if (!loaded || !s.engine.isLoaded) {
+    throw new Error('O contexto automático não pôde ser preparado para esta tarefa.');
+  }
+  s.sessions.updateMetadata({
+    modelId: model.id,
+    backend: s.engine.diagnostics.backend,
+    contextSize: s.engine.diagnostics.contextSize ?? undefined
+  });
+}
+
+function parseContextMode(value: unknown): ContextMode {
+  return value === 'manual' ? 'manual' : 'automatic';
+}
+
+function isContextCapacityError(error: unknown): boolean {
+  if (isDeviceMemoryError(error)) return true;
+  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error);
+  return [
+    'failed to allocate', 'cannot allocate', 'context', 'kv cache',
+    'encerrou antes de ficar pronto', 'out of memory', 'not enough memory'
+  ].some(fragment => text.toLowerCase().includes(fragment));
 }
 
 async function restartEngine(s: Services): Promise<void> {
@@ -841,13 +1421,23 @@ async function restoreActiveModel(s: Services): Promise<string | undefined> {
 
 async function buildChatPrompt(s: Services, text: string): Promise<string> {
   const temporal = buildTemporalContext();
+  // OFFGRID_AGENTS_MD_CHAT: regras permanentes do projeto.
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const guideTargets = s.contextManager.priority(text);
+  const projectInstructions = await loadProjectInstructions({
+    workspaceRoot,
+    targetFiles: guideTargets
+  });
+  if (projectInstructions.files.length) {
+    s.logger.debug('agent', `[AGENTS.md] Chat: ${projectInstructions.files.map(file => file.filePath).join(' → ')}`);
+  }
   const question = `<pergunta>\n${text}\n</pergunta>`;
   if (!vscode.workspace.getConfiguration('offgrid').get<boolean>('includeWorkspaceContext', true)) {
-    return `${temporal}\n\n${question}`;
+    return [temporal, projectInstructions.text, question].filter(Boolean).join('\n\n');
   }
 
   const files = s.contextManager.priority(text).slice(0, 5);
-  const snippets: string[] = [];
+  const snippets: string[] = projectInstructions.text ? [projectInstructions.text] : [];
   for (const reference of files) {
     const file = reference.split('#')[0];
     if (!file) continue;
@@ -864,8 +1454,16 @@ async function buildChatPrompt(s: Services, text: string): Promise<string> {
   return [temporal, ...snippets, question].filter(Boolean).join('\n\n');
 }
 
-async function buildAgentSystemPrompt(s: Services, schemas: ReturnType<typeof schemasForMode>, mode: ConversationMode, prompt: string, modelTier: 'small' | 'medium' | 'large' = 'large'): Promise<string> {
-  const priority = s.contextManager.priority(prompt);
+async function buildAgentSystemPrompt(
+  s: Services,
+  schemas: ReturnType<typeof schemasForMode>,
+  mode: ConversationMode,
+  prompt: string,
+  modelTier: 'small' | 'medium' | 'large' = 'large',
+  priorityOverride?: string[]
+): Promise<string> {
+  const priority = priorityOverride ?? s.contextManager.priority(prompt);
+  const taskGuidance = fullStackFlowTaskGuidance(prompt) ?? frontendCrudTaskGuidance(prompt) ?? serviceTaskGuidance(prompt) ?? endpointTaskGuidance(prompt);
   const toolSignatures = schemas.map(compactToolSignature);
 
   // Modelos small (0.5B–1B) recebem prompt ultra-compacto: sem prosa,
@@ -875,7 +1473,11 @@ async function buildAgentSystemPrompt(s: Services, schemas: ReturnType<typeof sc
     return [
       'Agente Offgrid. Use ferramentas; não invente caminhos ou conteúdo.',
       'Ferramenta: responda apenas JSON {"name":"nome","arguments":{...}}; sem Markdown.',
+      'Só existem as ferramentas listadas abaixo. Nunca invente nomes de ferramenta.',
       'Leia antes de editar. Finalize com apply_changes; nunca grave direto.',
+      'Ao criar arquivos, gere conteúdo completo; nunca use TODO, FIXME ou comentários de implementação pendente.',
+      'Em create_file, content deve ser uma string JSON válida; escape quebras de linha e nunca use template literals com crases.',
+      taskGuidance,
       ...toolSignatures
     ].join('\n');
   }
@@ -886,12 +1488,15 @@ async function buildAgentSystemPrompt(s: Services, schemas: ReturnType<typeof sc
     buildTemporalContext(),
     `Modo=${mode}; autonomia=${s.autonomy}.`,
     `Ordem de contexto: ${priority.join(' → ') || 'nenhum arquivo explícito'}.`,
+    taskGuidance,
     'Para chamar ferramenta, responda somente JSON: {"name":"nome","arguments":{...}}. Sem Markdown ou explicação.',
     'Leia antes de editar; altere só o necessário; finalize com apply_changes; nunca grave direto.',
+    'Ao criar arquivos, gere conteúdo completo; nunca use TODO, FIXME ou comentários de implementação pendente.',
+      'Em create_file, content deve ser uma string JSON válida; escape quebras de linha e nunca use template literals com crases.',
     s.autonomy === 'assisted'
       ? 'No modo Assistido, criação e exclusão exigem confirmação intermediária.'
       : 'No modo Autônomo, criação e exclusão continuam sujeitas à revisão final.',
-    'Ferramentas: R=leitura, W=escrita, ?=opcional.',
+    'Só existem as ferramentas listadas abaixo; nunca invente nomes de ferramenta.',
     ...toolSignatures
   ].join('\n');
 }
@@ -914,7 +1519,22 @@ function compactToolSignature(
     })
     .join(',');
 
-  return `${tool.write ? 'W' : 'R'} ${tool.name}(${argumentsText})`;
+  return `${tool.name}(${argumentsText})`;
+}
+
+// Calibração por tamanho do modelo (proxy via fileSize do GGUF Q4):
+//   small  < 0,7 GB  → modelos ultracompactos
+//   medium 0,7–3 GB  → 3B e 4B → prompt completo e contexto moderado
+//   large  > 3 GB    → 7B+     → contexto mais generoso quando houver memória
+function detectModelTier(modelFileSizeBytes: number): 'small' | 'medium' | 'large' {
+  const GB = 1024 ** 3;
+  // Limiares por tamanho do GGUF Q4:
+  //   small  < 0.7 GB → modelos ultracompactos
+  //   medium 0.7–3 GB → 3B e 4B Q4 → prompt completo
+  //   large  > 3 GB   → 7B+
+  return modelFileSizeBytes > 3 * GB ? 'large'
+    : modelFileSizeBytes > 0.7 * GB ? 'medium'
+      : 'small';
 }
 
 function calculateAgentContextBudget(params: {
@@ -923,6 +1543,7 @@ function calculateAgentContextBudget(params: {
   systemPromptChars: number;
   taskChars: number;
   modelFileSizeBytes: number;
+  minimumOutputTokens?: number;
 }): {
   maxOutputTokens: number;
   safetyTokens: number;
@@ -933,9 +1554,15 @@ function calculateAgentContextBudget(params: {
 } {
   const contextSize = Math.max(256, Math.floor(params.contextSize));
   const configuredMaxTokens = Math.max(64, Math.floor(params.configuredMaxTokens));
+  const minimumOutputTokens = Math.max(0, Math.floor(params.minimumOutputTokens ?? 0));
+  const standardOutputCap = Math.max(96, Math.floor(contextSize * 0.16));
+  const extendedOutputCap = Math.max(standardOutputCap, Math.floor(contextSize * 0.25));
+  const outputCap = minimumOutputTokens > standardOutputCap
+    ? extendedOutputCap
+    : standardOutputCap;
   const maxOutputTokens = Math.min(
-    configuredMaxTokens,
-    Math.max(96, Math.floor(contextSize * 0.16))
+    Math.max(configuredMaxTokens, minimumOutputTokens),
+    outputCap
   );
   const safetyTokens = Math.max(64, Math.floor(contextSize * 0.06));
   const availableInputTokens = Math.max(
@@ -955,15 +1582,7 @@ function calculateAgentContextBudget(params: {
       - fixedOverheadChars
   );
 
-  // Calibração por tamanho do modelo (proxy via fileSize do GGUF Q4):
-  //   small  < 1 GB  → 0.5B–1B  → prefill lento em CPU, contexto mínimo
-  //   medium 1–3 GB  → 3B       → prefill razoável, contexto moderado
-  //   large  > 3 GB  → 7B+      → prefill rápido com GPU, contexto generoso
-  const GB = 1024 ** 3;
-  const modelTier: 'small' | 'medium' | 'large' =
-    params.modelFileSizeBytes > 3 * GB ? 'large'
-      : params.modelFileSizeBytes > 1 * GB ? 'medium'
-        : 'small';
+  const modelTier = detectModelTier(params.modelFileSizeBytes);
 
   const tierMaxFiles =
     modelTier === 'large' ? 8
@@ -1069,7 +1688,11 @@ function parseGpuLayers(value: unknown): number | 'auto' {
 function repositoryUrl(value: unknown): string { return typeof value === 'string' ? value : String((value as { url?: string })?.url ?? 'https://github.com/rmagnocopilot/offgrid'); }
 function modelPathForActive(s: Services): string { const model = s.activeModelId ? s.catalog.list().find(item => item.id === s.activeModelId) : undefined; return model?.filePath ?? ''; }
 function stateLabel(model: ModelStatus): string { return `${model.state} · ${model.approxSize}${model.lastError ? ` · ${model.lastError}` : ''}`; }
-function shortModelName(file: string): string { return path.basename(file, '.gguf').replace('qwen2.5-coder-', 'Qwen ').replace('-instruct-q4_k_m', ''); }
+function shortModelName(file: string): string {
+  const name = path.basename(file, '.gguf');
+  if (name.toLowerCase() === 'qwen3-4b-q4_k_m') return 'Qwen3 4B';
+  return name.replace('qwen2.5-coder-', 'Qwen ').replace('-instruct-q4_k_m', '');
+}
 function friendlyModelError(error: unknown, model: string): string {
   const text = error instanceof Error ? error.message : String(error);
   if (/cannot find module|node-llama-cpp/i.test(text)) return `Não foi possível iniciar ${model}: o runtime node-llama-cpp não foi encontrado ou não pôde ser carregado. Consulte os logs.`;

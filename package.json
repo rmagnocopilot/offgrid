@@ -182,12 +182,25 @@
           "default": "auto",
           "description": "Camadas na GPU: auto ou um número inteiro maior ou igual a zero."
         },
+        "offgrid.contextMode": {
+          "type": "string",
+          "enum": [
+            "automatic",
+            "manual"
+          ],
+          "default": "automatic",
+          "enumDescriptions": [
+            "Calcula o contexto conforme modelo, memória e tarefa.",
+            "Usa o valor fixo de offgrid.contextSize."
+          ],
+          "description": "Seleção automática ou manual da janela de contexto."
+        },
         "offgrid.contextSize": {
           "type": "number",
           "default": 4096,
           "minimum": 1024,
           "maximum": 32768,
-          "description": "Janela de contexto do modelo."
+          "description": "Janela de contexto usada quando offgrid.contextMode está em manual."
         },
         "offgrid.maxTokens": {
           "type": "number",
@@ -298,13 +311,13 @@
     }
   },
   "dependencies": {
-    "node-llama-cpp": "3.19.1"
+    "node-llama-cpp": "3.19.1",
+    "typescript": "^5.8.3"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",
     "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^3.6.0",
-    "typescript": "^5.8.3"
+    "@vscode/vsce": "^3.6.0"
   },
   "allowScripts": {
     "node-llama-cpp@3.19.1": true

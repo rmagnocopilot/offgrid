@@ -7,6 +7,13 @@ export type DiagnosticsPanelMode = 'hidden' | 'compact' | 'expanded' | 'onError'
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
 export type ApprovalMode = 'ask' | 'readOnly' | 'full';
 
+export interface ModelContextProfile {
+  minimum: number;
+  base: number;
+  complex: number;
+  maximum: number;
+}
+
 export interface ModelDefinition {
   id: string;
   displayName: string;
@@ -19,6 +26,9 @@ export interface ModelDefinition {
   license: string;
   commercialUse: boolean;
   source: string;
+  parameterCountB?: number;
+  contextProfile?: ModelContextProfile;
+  promptMode?: 'default' | 'no-think';
 }
 
 export type ModelInstallState = 'notInstalled' | 'installed' | 'active' | 'loaded' | 'error';
@@ -38,6 +48,7 @@ export interface EngineLoadOptions {
   temperature: number;
   fallbackToCpu: boolean;
   adaptiveGpu: boolean;
+  promptMode?: 'default' | 'no-think';
 }
 
 export interface UnloadStep {

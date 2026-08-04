@@ -129,6 +129,7 @@ export class EngineClient {
 
   async runAgent(params: {
     initialPrompt: string;
+    taskReminder?: string;
     systemPrompt: string;
     maxSteps: number;
     diagnosticMode: boolean;
@@ -156,6 +157,7 @@ export class EngineClient {
       const loop = new AgentLoop();
       const result = await loop.run({
         initialPrompt: params.initialPrompt,
+        taskReminder: params.taskReminder,
         maxSteps: params.maxSteps,
         diagnosticMode: params.diagnosticMode,
         signal: params.signal,
@@ -163,13 +165,18 @@ export class EngineClient {
         executeTool: params.executeTool,
         invokeStep: async (prompt, step) => {
           const stepStartedAt = Date.now();
+          const stepMaxTokens = prompt.includes('<correcao_chamada_ferramenta>')
+            ? Math.min(params.maxTokens ?? 192, 192)
+            : step === 1
+              ? params.maxTokens
+              : Math.min(params.maxTokens ?? 256, 256);
           this.logger.info(
             'agent',
             [
               `[Engine][2/3] Enviando agentStep ${step}.`,
               `prompt=${prompt.length} caracteres`,
               `primeiraEtapa=${step === 1}`,
-              `maxTokens=${params.maxTokens ?? 'configuração do motor'}`
+              `maxTokens=${stepMaxTokens ?? 'configuracao do motor'}`
             ].join(' ')
           );
 
@@ -179,7 +186,7 @@ export class EngineClient {
               options: {
                 firstStep: step === 1,
                 systemPrompt: params.systemPrompt,
-                maxTokens: params.maxTokens
+                maxTokens: stepMaxTokens
               }
             }, { signal: params.signal });
 
