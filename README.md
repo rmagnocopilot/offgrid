@@ -2,10 +2,17 @@
   <img src="resources/branding/offgrid-logo.png" alt="Offgrid" width="260">
 </p>
 
-# Offgrid 2.0.2
+# Offgrid 2.0.3
 
 Assistente local e offline para Visual Studio Code, reescrito em **TypeScript**. A arquitetura segue a separação usada pelo Unplugged entre Agente, ferramentas, contexto, segurança, motor LLM e interface, preservando os recursos adicionais construídos no Offgrid.
 
+## Novidades da versão 2.0.3
+
+- fallback automático para o motor embarcado `node-llama-cpp` quando o Windows bloqueia a execução do `llama-server`;
+- suporte embarcado aos backends CPU e Vulkan no Windows;
+- compatibilidade com ambientes corporativos que aplicam políticas de grupo contra executáveis baixados;
+- manutenção do `llama-server` como motor principal em máquinas sem restrições;
+- mensagem de diagnóstico indicando quando o motor alternativo é ativado.
 ## Abrir o Offgrid
 
 Após instalar o VSIX, clique no ícone **Offgrid** na Activity Bar, a barra vertical esquerda do VS Code. Também é possível clicar no status `Offgrid` na barra inferior ou executar `Offgrid: Abrir Chat`.
@@ -49,7 +56,9 @@ Somente um modelo fica carregado. A troca descarrega o anterior antes da nova ca
 
 ## Windows, Linux e macOS
 
-O Chat, o Agente, as sessões e a revisão usam o `llama-server` local gerenciado pelo Offgrid.
+O Offgrid usa o `llama-server` local como motor principal.
+
+No Windows, quando a execução do `llama-server.exe` é impedida por Política de Grupo ou outra restrição corporativa, o worker ativa automaticamente o motor embarcado `node-llama-cpp`. Esse fallback não exige a execução de um servidor externo e inclui suporte a CPU e Vulkan.
 
 **Recursos avançados de RAM/VRAM são otimizados para Windows:**
 
@@ -58,11 +67,10 @@ O Chat, o Agente, as sessões e a revisão usam o `llama-server` local gerenciad
 - inventário de GPU por CIM como estimativa;
 - cálculo com `Int64` para placas com 2 GB ou mais;
 - GPU Layers progressivas;
-- fallback para CPU;
+- fallback entre Vulkan e CPU;
 - perfil funcional por máquina e modelo.
 
-No Linux e macOS, falhas de telemetria não impedem o Offgrid de iniciar. O motor usa a detecção padrão e pode fazer fallback para CPU.
-
+No Linux e macOS, falhas de telemetria não impedem o Offgrid de iniciar. O motor usa a detecção padrão disponível e pode fazer fallback para CPU.
 ## Segurança
 
 - `node_modules` e `.git` são somente leitura;
@@ -106,7 +114,7 @@ npm run package
 Arquivo esperado:
 
 ```text
-offgrid-2.0.2.vsix
+offgrid-2.0.3.vsix
 ```
 
 Os modelos em `globalStorage/rmagnocopilot.offgrid/models` permanecem após a atualização do VSIX.

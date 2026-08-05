@@ -1,5 +1,6 @@
 import type { EngineRequest, WorkerOutboundMessage } from '../types/contracts';
 import { LlamaServerEngine } from '../llm/LlamaServerEngine';
+import { LlamaEngine } from '../llm/LlamaEngine';
 
 const controllers = new Map<string, AbortController>();
 const send = (message: WorkerOutboundMessage): void => { if (process.send) process.send(message); };
@@ -7,10 +8,43 @@ const send = (message: WorkerOutboundMessage): void => { if (process.send) proce
 // O caminho do binário é passado via variável de ambiente pelo EngineClient
 // para que o worker não precise conhecer o storagePath da extensão.
 const serverBinaryPath = process.env['OFFGRID_SERVER_BINARY'] ?? '';
-const engine = new LlamaServerEngine(
-  (level, message) => send({ type: 'log', level, category: 'model', message }),
+const engineLogger = (
+  level: 'trace' | 'debug' | 'info' | 'warn' | 'error',
+  message: string
+): void => send({ type: 'log', level, category: 'model', message });
+
+let usingServerEngine = true;
+let engine: LlamaServerEngine | LlamaEngine = new LlamaServerEngine(
+  engineLogger,
   serverBinaryPath
 );
+
+function isServerExecutionBlocked(error: unknown): boolean {
+  const text = error instanceof Error
+    ? [error.message, error.stack ?? ''].join('\n')
+    : String(error);
+
+  return /spawn\s+UNKNOWN|group policy|política de grupo|programa.*bloqueado|blocked.*policy/i.test(text);
+}
+
+async function loadEngine(options: any, systemPrompt: string): Promise<unknown> {
+  try {
+    return await engine.load(options, systemPrompt);
+  } catch (error) {
+    if (!usingServerEngine || !isServerExecutionBlocked(error)) throw error;
+
+    engineLogger(
+      'warn',
+      '[Load] llama-server bloqueado pelo Windows. Ativando motor embarcado node-llama-cpp.'
+    );
+
+    await engine.dispose().catch(() => undefined);
+    usingServerEngine = false;
+    engine = new LlamaEngine(engineLogger);
+
+    return engine.load(options, systemPrompt);
+  }
+}
 
 // Eleva a prioridade do processo para ABOVE_NORMAL no Windows.
 // Processos filhos forked do VS Code podem ser colocados em Efficiency Mode
@@ -104,7 +138,7 @@ process.on('message', async (message: unknown) => {
 async function handle(request: EngineRequest, signal: AbortSignal): Promise<unknown> {
   const params = request.params as Record<string, any>;
   switch (request.method) {
-    case 'load': return engine.load(params.options, params.systemPrompt ?? '');
+    case 'load': return loadEngine(params.options, params.systemPrompt ?? '');
     case 'prompt': return engine.prompt(params.text, {
       ...params.options, signal,
       onChunk: (chunk: string) => send({ type: 'chunk', requestId: request.requestId, chunk })

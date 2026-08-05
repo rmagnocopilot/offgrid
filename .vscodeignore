@@ -11,6 +11,3 @@ INSTRUCOES-*.txt
 UPDATE-MANIFEST*.txt
 node_modules/.cache/**
 resources/webview/codicon.svg
-
-node_modules/**
-!node_modules/typescript/**

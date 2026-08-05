@@ -373,14 +373,13 @@ test('instalador informa HTTP e limpa arquivos parciais após falha', async t =>
   assert.deepEqual(await fsp.readdir(dir), []);
 });
 
-test('package não inclui runtime nativo e mantém comandos da versão', () => {
+test('package inclui runtime embarcado e mantém comandos da versão', () => {
   const pkg = require('../package.json');
-  assert.equal(pkg.version, '2.0.2');
-  assert.equal(pkg.dependencies?.['node-llama-cpp'], undefined);
+  assert.equal(pkg.version, '2.0.3');
+  assert.equal(pkg.dependencies?.['node-llama-cpp'], '3.19.1');
   const commands = new Set(pkg.contributes.commands.map(item => item.command));
   for (const command of ['offgrid.openModelsFolder','offgrid.openDataFolder','offgrid.openLogsFolder']) assert.equal(commands.has(command), true);
 });
-
 test('interface possui seletor de autonomia e revisão individual por arquivo', () => {
   const provider = fs.readFileSync(path.join(root, 'src/ui/ChatViewProvider.ts'), 'utf8');
   const webview = fs.readFileSync(path.join(root, 'src/ui/webview/main.ts'), 'utf8');
@@ -433,17 +432,23 @@ test('workflow publica o Qwen3 4B intermediário no release de modelos', () => {
   assert.match(workflow, /7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5/);
 });
 
-test('worker usa somente o servidor llama atual', () => {
+test('worker usa llama-server com fallback para motor embarcado', () => {
   const worker = fs.readFileSync(
     path.join(root, 'src/engine/EngineWorker.ts'),
     'utf8'
   );
 
   assert.match(worker, /new LlamaServerEngine\(/);
-  assert.doesNotMatch(worker, /new LlamaEngine\(/);
+  assert.match(worker, /new LlamaEngine\(engineLogger\)/);
+  assert.match(worker, /isServerExecutionBlocked/);
+  assert.match(worker, /spawn\\s\+UNKNOWN/);
   assert.equal(
     fs.existsSync(path.join(root, 'src/llm/LlamaEngine.ts')),
-    false
+    true
+  );
+  assert.equal(
+    fs.existsSync(path.join(root, 'src/types/node-llama-cpp.d.ts')),
+    true
   );
 });
 
@@ -520,7 +525,7 @@ test('PowerShell usa Int64 e UTF-8', () => {
   const ps = fs.readFileSync(path.join(root,'resources/windows/gpu-memory.ps1'),'utf8'); assert.match(ps,/\[int64\]/); assert.match(ps,/UTF8Encoding/); assert.doesNotMatch(ps,/\[Math\]::Max\(0,/);
 });
 test('package aponta para JavaScript compilado e mantém fontes TypeScript', () => {
-  const pkg = require('../package.json'); assert.equal(pkg.main,'./out/extension.js'); assert.equal(pkg.version,'2.0.2'); assert.ok(fs.existsSync(path.join(root,'src/extension.ts'))); assert.equal(fs.existsSync(path.join(root,'src/extension.js')),false);
+  const pkg = require('../package.json'); assert.equal(pkg.main,'./out/extension.js'); assert.equal(pkg.version,'2.0.3'); assert.ok(fs.existsSync(path.join(root,'src/extension.ts'))); assert.equal(fs.existsSync(path.join(root,'src/extension.js')),false);
 });
 test('Activity Bar e abertura por F5 estão configuradas', () => {
   const pkg = require('../package.json'); assert.equal(pkg.contributes.viewsContainers.activitybar[0].id,'offgrid'); const launch = JSON.parse(fs.readFileSync(path.join(root,'.vscode/launch.json'),'utf8')); assert.equal(launch.configurations[0].type,'extensionHost');
