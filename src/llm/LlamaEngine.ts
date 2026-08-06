@@ -38,7 +38,7 @@ export function isDeviceMemoryError(error: unknown): boolean {
  */
 function createQwenSession(runtime: NodeLlamaCppRuntime, sequence: any, systemPrompt: string): any {
   const QwenChatWrapper = (runtime as any).QwenChatWrapper;
-  const chatWrapper = QwenChatWrapper ? new QwenChatWrapper({ variation: '3' }) : 'auto';
+  const chatWrapper = QwenChatWrapper ? new QwenChatWrapper({ variation: '3', thoughts: 'discourage', keepOnlyLastThought: true }) : 'auto';
   return new runtime.LlamaChatSession({
     contextSequence: sequence,
     systemPrompt,

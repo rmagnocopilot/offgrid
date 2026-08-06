@@ -2,11 +2,11 @@
   <img src="resources/branding/offgrid-logo.png" alt="Offgrid" width="260">
 </p>
 
-# Offgrid 2.0.3
+# Offgrid 2.0.4
 
 Assistente local e offline para Visual Studio Code, reescrito em **TypeScript**. A arquitetura segue a separação usada pelo Unplugged entre Agente, ferramentas, contexto, segurança, motor LLM e interface, preservando os recursos adicionais construídos no Offgrid.
 
-## Novidades da versão 2.0.3
+## Novidades da versão 2.0.4
 
 - fallback automático para o motor embarcado `node-llama-cpp` quando o Windows bloqueia a execução do `llama-server`;
 - suporte embarcado aos backends CPU e Vulkan no Windows;
@@ -114,7 +114,7 @@ npm run package
 Arquivo esperado:
 
 ```text
-offgrid-2.0.3.vsix
+offgrid-2.0.4.vsix
 ```
 
 Os modelos em `globalStorage/rmagnocopilot.offgrid/models` permanecem após a atualização do VSIX.
