@@ -361,6 +361,41 @@ export function detectToolCall(text: string): ToolCall | null {
   return detectToolCalls(text)[0] ?? null;
 }
 
+
+function isOrphanToolPayload(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const object = value as Record<string, unknown>;
+  if (object.name || object.tool || object.functionName || object.function_call || object.tool_call || object.tool_calls) {
+    return false;
+  }
+
+  const hasFilePath = typeof object.filePath === 'string' && object.filePath.trim().length > 0;
+  return hasFilePath && (
+    Object.prototype.hasOwnProperty.call(object, 'content')
+    || Object.prototype.hasOwnProperty.call(object, 'oldText')
+    || Object.prototype.hasOwnProperty.call(object, 'newText')
+    || Object.prototype.hasOwnProperty.call(object, 'newPath')
+  );
+}
+
+function looksLikeOrphanToolPayload(text: string): boolean {
+  const raw = stripFence(text);
+  const candidates = [raw, ...balancedCandidates(raw)];
+  const seen = new Set<string>();
+
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    try {
+      if (isOrphanToolPayload(JSON.parse(candidate))) return true;
+    } catch { /* resposta pode ter sido truncada */ }
+  }
+
+  // Recupera também JSON truncado como {"filePath":"...","content":"...",
+  // observado quando o limite de saída era atingido antes de fechar a chamada.
+  return /"filePath"\s*:\s*["'`][\s\S]*?"(?:content|oldText|newText|newPath)"\s*:/i.test(raw);
+}
+
 export function looksLikeToolSchema(text: string): boolean {
   const raw = stripFence(text);
   const candidates = [raw, ...balancedCandidates(raw)];
@@ -377,7 +412,8 @@ export function looksLikeToolSchema(text: string): boolean {
 
 export function looksLikeToolCall(text: string): boolean {
   return /"(?:name|tool|functionName|function_call|tool_call)"\s*:|"tool_calls"\s*:|<tool_call/i.test(text)
-    || looksLikeToolSchema(text);
+    || looksLikeToolSchema(text)
+    || looksLikeOrphanToolPayload(text);
 }
 
 function isToolSchema(value: unknown): boolean {

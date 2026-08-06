@@ -110,5 +110,19 @@ function validateManifest(value: unknown, manifestPath: string): Manifest {
     ids.add(model.id);
     files.add(model.fileName.toLowerCase());
   }
+
+  const binaryFiles = new Set<string>();
+  for (const binary of candidate.binaries) {
+    if (!binary?.fileName || path.basename(binary.fileName) !== binary.fileName) {
+      throw new Error(`Nome de arquivo de binário inválido: ${binary?.fileName ?? 'ausente'}`);
+    }
+    if (!/^[a-f0-9]{64}$/i.test(binary.sha256)) {
+      throw new Error(`SHA-256 inválido para o binário ${binary.fileName}.`);
+    }
+    const key = binary.fileName.toLowerCase();
+    if (binaryFiles.has(key)) throw new Error(`Arquivo de binário duplicado: ${binary.fileName}`);
+    binaryFiles.add(key);
+  }
+
   return candidate as Manifest;
 }

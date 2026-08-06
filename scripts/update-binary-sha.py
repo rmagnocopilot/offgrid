@@ -13,7 +13,7 @@ if len(sys.argv) != 5:
 win_sha, linux_sha, macos_arm_sha, macos_x64_sha = sys.argv[1:5]
 
 sha_map = {
-    "llama-server-win-x64.exe": win_sha,
+    "llama-server-win-x64.zip": win_sha,
     "llama-server-linux-x64": linux_sha,
     "llama-server-darwin-arm64": macos_arm_sha,
     "llama-server-darwin-x64": macos_x64_sha

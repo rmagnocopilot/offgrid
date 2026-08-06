@@ -46,12 +46,17 @@ export function llamaServerPackageName(): string {
 export function llamaServerExecutablePath(binariesDir: string): string {
   const platform = process.platform;
   const arch = process.arch;
-  const path = require('node:path');
 
   if (platform === 'win32' && arch === 'x64') {
-    // Windows: Expand-Archive cria uma subpasta extra com o nome do zip.
-    // Estrutura real: binaries/llama-server-win-x64/llama-server-win-x64/llama-server.exe
-    return path.join(binariesDir, 'llama-server-win-x64', 'llama-server-win-x64', 'llama-server.exe');
+    // O asset oficial contém uma pasta interna, mas versões antigas e pacotes
+    // recriados manualmente podem extrair o executável em níveis diferentes.
+    const candidates = [
+      path.join(binariesDir, 'llama-server-win-x64', 'llama-server-win-x64', 'llama-server.exe'),
+      path.join(binariesDir, 'llama-server-win-x64', 'llama-server.exe'),
+      path.join(binariesDir, 'llama-server.exe'),
+      path.join(binariesDir, 'llama-server-win-x64.exe')
+    ];
+    return candidates.find(candidate => fs.existsSync(candidate)) ?? candidates[0]!;
   }
   if (platform === 'linux' && arch === 'x64') return path.join(binariesDir, 'llama-server-linux-x64');
   if (platform === 'darwin' && arch === 'arm64') return path.join(binariesDir, 'llama-server-darwin-arm64');
@@ -76,7 +81,7 @@ export class LlamaServerManager {
 
   /** Caminho completo do binário para a plataforma atual. */
   get binaryPath(): string {
-    return path.join(this.binariesDirectory, llamaServerBinaryName());
+    return llamaServerExecutablePath(this.binariesDirectory);
   }
 
   /** Retorna true se o binário já está presente em disco. */
@@ -112,8 +117,11 @@ export class LlamaServerManager {
     onProgress({ message: `Baixando ${packageFile}...` });
 
     try {
+      let lastPercent = 0;
       await download(url, partial, (percent) => {
-        onProgress({ message: `Baixando llama-server: ${percent}%`, increment: percent });
+        const increment = Math.max(0, percent - lastPercent);
+        lastPercent = percent;
+        onProgress({ message: `Baixando llama-server: ${percent}%`, increment });
       });
 
       // Valida SHA-256
@@ -132,6 +140,9 @@ export class LlamaServerManager {
         const { promisify } = await import('node:util');
         const execFileAsync = promisify(execFile);
         const extractDir = path.join(this.binariesDirectory, path.basename(packageFile, '.zip'));
+        // Remove resíduos de versões anteriores. Misturar DLLs antigas com um
+        // executável novo pode causar falhas de carga difíceis de diagnosticar.
+        await fsp.rm(extractDir, { recursive: true, force: true });
         await fsp.mkdir(extractDir, { recursive: true });
         // Renomeia .partial → .zip antes de extrair (Expand-Archive exige extensão .zip)
         const partialAsZip = partial.replace(/\.partial$/, '');
@@ -151,8 +162,15 @@ export class LlamaServerManager {
         await fsp.chmod(target, 0o755);
       }
 
+      // Recalcula depois da extração, pois o ZIP pode conter uma pasta raiz
+      // adicional ou colocar llama-server.exe diretamente no diretório alvo.
+      const installedExecutablePath = llamaServerExecutablePath(this.binariesDirectory);
+      if (!fs.existsSync(installedExecutablePath)) {
+        throw new Error(`O pacote foi extraído, mas o executável não foi encontrado em ${installedExecutablePath}.`);
+      }
+
       onProgress({ message: 'llama-server instalado com sucesso.' });
-      return executablePath;
+      return installedExecutablePath;
     } catch (error) {
       await fsp.rm(partial, { force: true }).catch(() => undefined);
       throw error;
@@ -165,35 +183,59 @@ export class LlamaServerManager {
 async function download(
   url: string,
   destination: string,
-  onPercent: (percent: number) => void
+  onPercent: (percent: number) => void,
+  redirects = 0
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
+  if (redirects > 8) throw new Error('Muitos redirecionamentos durante o download do llama-server.');
+
+  await new Promise<void>((resolve, reject) => {
     const proto = url.startsWith('https:') ? https : http;
-    proto.get(url, { timeout: 30_000 }, (res) => {
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        const location = res.headers.location;
-        if (!location) { reject(new Error(`Redirecionamento sem Location: ${url}`)); return; }
-        download(location, destination, onPercent).then(resolve, reject);
+    const request = proto.get(url, {
+      headers: {
+        'User-Agent': 'Offgrid-VSCode',
+        'Accept': 'application/octet-stream'
+      }
+    }, (res) => {
+      const status = res.statusCode ?? 0;
+      if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
+        res.resume();
+        const next = new URL(res.headers.location, url).toString();
+        download(next, destination, onPercent, redirects + 1).then(resolve, reject);
         return;
       }
-      if (res.statusCode !== 200) {
-        reject(new Error(`HTTP ${res.statusCode} ao baixar ${url}`));
+      if (status !== 200) {
+        res.resume();
+        reject(new Error(`HTTP ${status}${res.statusMessage ? ` ${res.statusMessage}` : ''} ao baixar ${url}`));
         return;
       }
 
-      const total = parseInt(res.headers['content-length'] ?? '0', 10);
+      const total = Number(res.headers['content-length'] ?? 0);
       let received = 0;
+      let lastReported = -1;
+      const out = fs.createWriteStream(destination, { flags: 'w' });
 
       res.on('data', (chunk: Buffer) => {
         received += chunk.length;
-        if (total > 0) onPercent(Math.round((received / total) * 100));
+        if (total > 0) {
+          const percent = Math.min(100, Math.floor(received / total * 100));
+          if (percent !== lastReported) {
+            lastReported = percent;
+            onPercent(percent);
+          }
+        }
       });
+      res.on('aborted', () => out.destroy(new Error('A conexão foi interrompida antes do fim do download.')));
 
-      const out = fs.createWriteStream(destination);
-      pipeline(res as unknown as NodeJS.ReadableStream, out)
-        .then(resolve)
+      pipeline(res, out)
+        .then(() => { onPercent(100); resolve(); })
         .catch(reject);
-    }).on('error', reject);
+    });
+
+    request.on('error', reject);
+    request.setTimeout(60_000, () => request.destroy(new Error('Tempo esgotado durante o download do llama-server.')));
+  }).catch(async error => {
+    await fsp.rm(destination, { force: true }).catch(() => undefined);
+    throw error;
   });
 }
 

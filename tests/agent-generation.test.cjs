@@ -5,6 +5,7 @@ const os = require('node:os');
 const fsp = require('node:fs/promises');
 
 const { AgentLoop } = require('../out/agent/AgentLoop');
+const { looksLikeToolCall } = require('../out/agent/ToolCallParser');
 const { tryPrepareSimpleEditFastPath } = require('../out/agent/SimpleEditFastPath');
 const {
   agentOutputTokenFloor,
@@ -125,4 +126,133 @@ test('rejeita JUnit 5 quando a tarefa pede JUnit 4', () => {
   );
 
   assert.match(issue, /pediu JUnit 4/);
+});
+
+
+test('JSON órfão com filePath e content é tratado como chamada inválida', () => {
+  const response = 'Aqui está o arquivo:\n```json\n{"filePath":"src/A.java","content":"class A {}"}\n```';
+  assert.equal(looksLikeToolCall(response), true);
+});
+
+test('AgentLoop corrige JSON órfão em vez de mostrá-lo como resposta final', async () => {
+  const prompts = [];
+  let attempt = 0;
+  const result = await new AgentLoop().run({
+    initialPrompt: 'crie o arquivo',
+    taskReminder: 'Crie src/A.java.',
+    maxSteps: 2,
+    diagnosticMode: false,
+    log() {},
+    async invokeStep(prompt) {
+      prompts.push(prompt);
+      attempt += 1;
+      return attempt === 1
+        ? 'Aqui está:\n```json\n{"filePath":"src/A.java","content":"class A {}"}\n```'
+        : '{"name":"create_file","arguments":{"filePath":"src/A.java","content":"class A {}"}}';
+    },
+    async executeTool(call) {
+      return { callId: call.id, name: call.name, ok: true, content: { staged: true }, durationMs: 0 };
+    }
+  });
+  assert.equal(result.calls[0].name, 'create_file');
+  assert.match(prompts[1], /refaça a chamada COMPLETA/);
+});
+
+test('AgentLoop permite corrigir erro de validação de escrita', async () => {
+  let generation = 0;
+  let execution = 0;
+  const result = await new AgentLoop().run({
+    initialPrompt: 'crie o arquivo',
+    taskReminder: 'Crie src/A.java.',
+    maxSteps: 3,
+    diagnosticMode: false,
+    log() {},
+    async invokeStep() {
+      generation += 1;
+      return generation === 1
+        ? '{"name":"create_file","arguments":{"filePath":"src/A.java","content":"TODO"}}'
+        : '{"name":"create_file","arguments":{"filePath":"src/A.java","content":"class A {}"}}';
+    },
+    async executeTool(call) {
+      execution += 1;
+      return execution === 1
+        ? { callId: call.id, name: call.name, ok: false, content: null, error: 'Conteúdo contém TODO.', durationMs: 0 }
+        : { callId: call.id, name: call.name, ok: true, content: { staged: true }, durationMs: 0 };
+    }
+  });
+  assert.equal(generation, 2);
+  assert.equal(result.calls.length, 2);
+  assert.match(result.text, /Alteração preparada para revisão/);
+});
+
+test('AgentLoop não insiste após rejeição explícita do usuário', async () => {
+  let generation = 0;
+  await assert.rejects(() => new AgentLoop().run({
+    initialPrompt: 'crie o arquivo',
+    taskReminder: 'Crie src/A.java.',
+    maxSteps: 3,
+    diagnosticMode: false,
+    log() {},
+    async invokeStep() {
+      generation += 1;
+      return '{"name":"create_file","arguments":{"filePath":"src/A.java","content":"class A {}"}}';
+    },
+    async executeTool(call) {
+      return { callId: call.id, name: call.name, ok: false, content: null, error: 'Alteração rejeitada pelo usuário.', durationMs: 0 };
+    }
+  }), /rejeitada pelo usuário/);
+  assert.equal(generation, 1);
+});
+
+
+test('AgentLoop também reconhece rejeição explícita em inglês', async () => {
+  let generation = 0;
+  await assert.rejects(() => new AgentLoop().run({
+    initialPrompt: 'create the file',
+    taskReminder: 'Create src/A.java.',
+    maxSteps: 3,
+    diagnosticMode: false,
+    log() {},
+    async invokeStep() {
+      generation += 1;
+      return '{"name":"create_file","arguments":{"filePath":"src/A.java","content":"class A {}"}}';
+    },
+    async executeTool(call) {
+      return { callId: call.id, name: call.name, ok: false, content: null, error: 'Change rejected by user.', durationMs: 0 };
+    }
+  }), /rejected by user/);
+  assert.equal(generation, 1);
+});
+
+test('AgentLoop não encerra após leitura intermediária enquanto corrige escrita parcial', async () => {
+  let generation = 0;
+  const result = await new AgentLoop().run({
+    initialPrompt: 'crie dois arquivos',
+    taskReminder: 'Crie src/A.java e src/B.java.',
+    maxSteps: 4,
+    diagnosticMode: false,
+    log() {},
+    async invokeStep() {
+      generation += 1;
+      if (generation === 1) {
+        return JSON.stringify([
+          { name: 'create_file', arguments: { filePath: 'src/A.java', content: 'class A {}' } },
+          { name: 'create_file', arguments: { filePath: 'src/B.java', content: 'TODO' } }
+        ]);
+      }
+      if (generation === 2) {
+        return '{"name":"read_file","arguments":{"filePath":"src/A.java"}}';
+      }
+      return '{"name":"create_file","arguments":{"filePath":"src/B.java","content":"class B {}"}}';
+    },
+    async executeTool(call) {
+      if (call.name === 'create_file' && call.arguments.content === 'TODO') {
+        return { callId: call.id, name: call.name, ok: false, content: null, error: 'Conteúdo contém TODO.', durationMs: 0 };
+      }
+      return { callId: call.id, name: call.name, ok: true, content: { staged: call.name === 'create_file' }, durationMs: 0 };
+    }
+  });
+
+  assert.equal(generation, 3);
+  assert.match(result.text, /src\/A\.java, src\/B\.java/);
 });

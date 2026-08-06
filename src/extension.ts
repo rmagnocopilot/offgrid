@@ -773,7 +773,9 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
       });
       const contextStartedAt = Date.now();
       const effectiveMaxFiles = taskContextEstimate.complexity === 'simple'
-        ? 1
+        ? genericFileCreationTask && !rootCreationTarget
+          ? Math.min(3, budget.maxFiles)
+          : 1
         : budget.maxFiles;
 
       s.logger.info(
@@ -793,6 +795,7 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
       const workspaceContext = await buildAgentWorkspaceContext({
         workspaceRoot,
         priority: contextPriority,
+        request: text,
         maxFiles: effectiveMaxFiles,
         maxCharsPerFile: budget.maxCharsPerFile,
         maxTotalChars: budget.workspaceChars,

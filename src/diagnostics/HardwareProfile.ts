@@ -4,7 +4,7 @@ import * as fsp from 'node:fs/promises';
 import type { Backend, EngineLoadOptions, ResourceSnapshot } from '../types/contracts';
 
 export interface LoadAttempt { gpu: Backend; gpuLayers: number | 'auto'; reason: string }
-interface StoredProfile { modelKey: string; machineKey: string; attempt: LoadAttempt; updatedAt: string }
+interface StoredProfile { modelKey: string; machineKey: string; contextSize?: number; attempt: LoadAttempt; updatedAt: string }
 
 export function chooseLoadAttempts(options: EngineLoadOptions, resources: ResourceSnapshot, saved?: LoadAttempt): LoadAttempt[] {
   if (options.gpu !== 'auto') {
@@ -68,14 +68,24 @@ export class HardwareProfileStore {
       this.profiles = [];
     }
   }
-  get(modelPath: string): LoadAttempt | undefined {
-    return this.profiles.find(item => item.modelKey === path.basename(modelPath) && item.machineKey === machineKey())?.attempt;
+  get(modelPath: string, contextSize?: number): LoadAttempt | undefined {
+    const normalizedContext = normalizeContextSize(contextSize);
+    return this.profiles.find(item =>
+      item.modelKey === path.basename(modelPath)
+      && item.machineKey === machineKey()
+      && item.contextSize === normalizedContext
+    )?.attempt;
   }
-  async recordSuccess(modelPath: string, attempt: LoadAttempt): Promise<void> {
+  async recordSuccess(modelPath: string, contextSize: number | undefined, attempt: LoadAttempt): Promise<void> {
     const modelKey = path.basename(modelPath);
     const key = machineKey();
-    this.profiles = this.profiles.filter(item => item.modelKey !== modelKey || item.machineKey !== key);
-    this.profiles.push({ modelKey, machineKey: key, attempt, updatedAt: new Date().toISOString() });
+    const normalizedContext = normalizeContextSize(contextSize);
+    this.profiles = this.profiles.filter(item =>
+      item.modelKey !== modelKey
+      || item.machineKey !== key
+      || item.contextSize !== normalizedContext
+    );
+    this.profiles.push({ modelKey, machineKey: key, contextSize: normalizedContext, attempt, updatedAt: new Date().toISOString() });
     await fsp.mkdir(path.dirname(this.file), { recursive: true });
     await fsp.writeFile(this.file, JSON.stringify(this.profiles, null, 2), 'utf8');
   }
@@ -91,8 +101,16 @@ function isStoredProfile(value: unknown): value is StoredProfile {
   if (!isRecord(value.attempt) || typeof value.attempt.reason !== 'string') return false;
   const gpu = value.attempt.gpu;
   const gpuLayers = value.attempt.gpuLayers;
+  const contextSize = value.contextSize;
   return ['auto', 'cpu', 'cuda', 'vulkan', 'metal'].includes(String(gpu))
+    && (contextSize === undefined || (typeof contextSize === 'number' && Number.isInteger(contextSize) && contextSize >= 2_048))
     && (gpuLayers === 'auto' || (typeof gpuLayers === 'number' && Number.isFinite(gpuLayers) && gpuLayers >= 0));
+}
+
+function normalizeContextSize(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(2_048, Math.floor(value))
+    : undefined;
 }
 
 function machineKey(): string { return `${process.platform}:${process.arch}:${os.hostname()}:${Math.round(os.totalmem() / 1024 ** 3)}`; }

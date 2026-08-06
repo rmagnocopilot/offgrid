@@ -7,8 +7,8 @@
       "id": "qwen2.5-coder-3b-q4_k_m",
       "displayName": "Qwen2.5-Coder-3B-Instruct Q4_K_M",
       "fileName": "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
-      "description": "Op??o econ?mica especializada em c?digo, indicada para m?quinas com mem?ria limitada.",
-      "hardware": "CPU; recomendado 8 GB de RAM ou mais; contexto autom?tico entre 4096 e 8192",
+      "description": "Opção econômica especializada em código, indicada para máquinas com memória limitada.",
+      "hardware": "CPU; recomendado 8 GB de RAM ou mais; contexto automático entre 4096 e 8192",
       "approxSize": "~2,1 GB",
       "sha256": "724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7",
       "parts": [
@@ -31,8 +31,8 @@
       "id": "qwen3-4b-q4_k_m",
       "displayName": "Qwen 4B",
       "fileName": "qwen3-4b-q4_k_m.gguf",
-      "description": "Modelo intermedi?rio recomendado para Chat e Agente, com maior capacidade de racioc?nio e gera??o de c?digo.",
-      "hardware": "CPU; recomendado 12 GB de RAM ou mais; contexto autom?tico entre 4096 e 12288",
+      "description": "Modelo intermediário recomendado para Chat e Agente, com maior capacidade de raciocínio e geração de código.",
+      "hardware": "CPU; recomendado 12 GB de RAM ou mais; contexto automático entre 4096 e 12288",
       "approxSize": "~2,5 GB",
       "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
       "parts": [
@@ -55,7 +55,7 @@
       "displayName": "Qwen2.5-Coder-7B-Instruct Q4_K_M",
       "fileName": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
       "description": "Melhor qualidade para uso geral e empresarial.",
-      "hardware": "CPU com pelo menos 16 GB de RAM ou GPU compat?vel; contexto autom?tico entre 4096 e 16384",
+      "hardware": "CPU com pelo menos 16 GB de RAM ou GPU compatível; contexto automático entre 4096 e 16384",
       "approxSize": "~4,7 GB",
       "sha256": "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c",
       "parts": [
@@ -80,22 +80,22 @@
     {
       "fileName": "llama-server-win-x64.zip",
       "sha256": "4d75b0dc52f42cdfdb547ef858662620e843bdf43d65e14ba233a6e20c103b52",
-      "description": "Servidor de infer?ncia llama.cpp para Windows x64 (inclui DLLs necess?rias). Requerido pelo modo Agente do Offgrid."
+      "description": "Servidor de inferência llama.cpp para Windows x64 (inclui DLLs necessárias). Requerido pelo modo Agente do Offgrid."
     },
     {
       "fileName": "llama-server-linux-x64",
       "sha256": "836ca690b693c31fba47496c6cfd5dc6dd598a1dafba2a4e2a09a8135d7f0c39",
-      "description": "Servidor de infer?ncia llama.cpp para Linux x64."
+      "description": "Servidor de inferência llama.cpp para Linux x64."
     },
     {
       "fileName": "llama-server-darwin-arm64",
       "sha256": "ff0e2445d93e2d6305c44cce6386db1020385194261dc184deaf0f37c7148d85",
-      "description": "Servidor de infer?ncia llama.cpp para macOS Apple Silicon."
+      "description": "Servidor de inferência llama.cpp para macOS Apple Silicon."
     },
     {
       "fileName": "llama-server-darwin-x64",
       "sha256": "58a29482e3273083944d964528a17bc6629ac46d4cf0d152e0fcb6e5c0835e01",
-      "description": "Servidor de infer?ncia llama.cpp para macOS Intel."
+      "description": "Servidor de inferência llama.cpp para macOS Intel."
     }
   ]
 }

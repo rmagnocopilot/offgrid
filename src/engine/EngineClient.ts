@@ -61,15 +61,25 @@ export class EngineClient {
       if (!this.serverManager.isInstalled()) {
         this.logger.info('model', '[Load] Binário llama-server não encontrado. Iniciando download...');
         const repoUrl = 'https://github.com/rmagnocopilot/offgrid';
-        await this.serverManager.ensureInstalled(repoUrl, (progress) => {
-          this.logger.info('model', `[Load][Binário] ${progress.message}`);
-        });
-        this.logger.info('model', '[Load] Binário llama-server instalado com sucesso.');
+        try {
+          await this.serverManager.ensureInstalled(repoUrl, (progress) => {
+            this.logger.info('model', `[Load][Binário] ${progress.message}`);
+          });
+          this.logger.info('model', '[Load] Binário llama-server instalado com sucesso.');
+        } catch (error) {
+          // O node-llama-cpp já está empacotado na extensão. Falha de rede,
+          // manifesto ou extração do servidor não deve impedir o motor embarcado.
+          this.logger.warn(
+            'model',
+            '[Load] Não foi possível instalar o llama-server; continuando para o fallback embarcado.',
+            error
+          );
+        }
       }
 
       const before = await this.refreshResources(true, true);
       this.logResources('antes de carregar', before);
-      const saved = this.profiles.get(options.modelPath);
+      const saved = this.profiles.get(options.modelPath, options.contextSize);
       const attempts = chooseLoadAttempts(options, before, saved);
       this.logger.info('model', `[Load] Plano: ${attempts.map(item => `${item.gpu}/${item.gpuLayers}`).join(' → ')}`);
       let lastError: unknown;
@@ -89,7 +99,7 @@ export class EngineClient {
             workerPid: this.worker?.pid ?? result.workerPid,
             lastFallback: index ? { from: attempts[0], to: attempt } : null
           };
-          await this.profiles.recordSuccess(options.modelPath, attempt);
+          await this.profiles.recordSuccess(options.modelPath, options.contextSize, attempt);
           this.state.resources = await this.refreshResources(true, false);
           this.logResources('depois de carregar', this.state.resources);
           return this.diagnostics;
@@ -165,11 +175,11 @@ export class EngineClient {
         executeTool: params.executeTool,
         invokeStep: async (prompt, step) => {
           const stepStartedAt = Date.now();
-          const stepMaxTokens = prompt.includes('<correcao_chamada_ferramenta>')
-            ? Math.min(params.maxTokens ?? 192, 192)
-            : step === 1
-              ? params.maxTokens
-              : Math.min(params.maxTokens ?? 256, 256);
+          // Chamadas de escrita carregam o conteúdo completo do arquivo dentro do
+          // próprio JSON. Limitar etapas posteriores a 256 tokens truncava create_file
+          // e transformava a resposta em texto comum. Todas as etapas usam o orçamento
+          // calculado para a tarefa; o motor ainda o reduz caso o contexto esteja cheio.
+          const stepMaxTokens = params.maxTokens;
           this.logger.info(
             'agent',
             [

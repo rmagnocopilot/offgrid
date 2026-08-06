@@ -100,13 +100,23 @@ function recoveryPrompt(schema: boolean, taskReminder?: string): string {
   ].join('\n');
 }
 
+
+function isExplicitUserRejection(result: ToolResult): boolean {
+  const message = String(result.error ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return (message.includes('rejeitad') && message.includes('usuario'))
+    || (message.includes('cancelad') && message.includes('usuario'))
+    || (message.includes('rejected') && message.includes('user'))
+    || (message.includes('cancelled') && message.includes('user'))
+    || (message.includes('canceled') && message.includes('user'));
+}
+
 function skippedApplyChangesResult(call: ToolCall): ToolResult {
   return {
     callId: call.id,
     name: call.name,
     ok: false,
     content: null,
-    error: 'apply_changes foi adiado porque nenhuma alteração foi preparada com sucesso.',
+    error: 'apply_changes foi adiado porque a tarefa ainda não está pronta para revisão.',
     durationMs: 0
   };
 }
@@ -150,6 +160,8 @@ export class AgentLoop {
 
         invalidRecoveryUsed = false;
         const executed: ExecutedTool[] = [];
+        const successfulWritesBefore = successfulWrites.length;
+        let recoverableWriteFailure = false;
         const finalizers = detected.filter(call => call.name === 'apply_changes');
         const regularCalls = detected.filter(call => call.name !== 'apply_changes');
 
@@ -165,8 +177,12 @@ export class AgentLoop {
           if (!result.ok) {
             options.log('error', `Ferramenta ${call.name} falhou: ${result.error ?? 'erro desconhecido'}`);
             if (REVIEW_WRITE_TOOLS.has(call.name)) {
-              options.log('warn', 'Escrita rejeitada; encerrando sem nova geracao do modelo.');
-              throw new Error(result.error ?? `A ferramenta ${call.name} rejeitou a alteracao proposta.`);
+              if (isExplicitUserRejection(result)) {
+                options.log('warn', 'Escrita rejeitada pelo usuário; encerrando sem nova geração do modelo.');
+                throw new Error(result.error ?? `A ferramenta ${call.name} foi rejeitada pelo usuário.`);
+              }
+              recoverableWriteFailure = true;
+              options.log('warn', 'Escrita inválida; devolvendo o erro ao modelo para uma tentativa de correção.');
             }
             continue;
           }
@@ -176,7 +192,21 @@ export class AgentLoop {
           }
         }
 
-        if (successfulWrites.length) {
+        const wroteSuccessfullyThisTurn = successfulWrites.length > successfulWritesBefore;
+
+        if (recoverableWriteFailure) {
+          for (const finalizer of finalizers) {
+            calls.push(finalizer);
+            const skipped = skippedApplyChangesResult(finalizer);
+            results.push(skipped);
+            executed.push({ call: finalizer, result: skipped });
+            options.log('warn', skipped.error ?? 'apply_changes adiado.');
+          }
+          prompt = resultPrompt(executed, options.taskReminder);
+          break;
+        }
+
+        if (wroteSuccessfullyThisTurn) {
           const finalizer = finalizers.at(-1);
           if (finalizer) {
             calls.push(finalizer);

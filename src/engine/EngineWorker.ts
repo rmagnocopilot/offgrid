@@ -24,7 +24,7 @@ function isServerExecutionBlocked(error: unknown): boolean {
     ? [error.message, error.stack ?? ''].join('\n')
     : String(error);
 
-  return /spawn\s+UNKNOWN|group policy|política de grupo|programa.*bloqueado|blocked.*policy/i.test(text);
+  return /spawn(?:\s+\S+)?|\b(?:UNKNOWN|ENOENT|EACCES|EPERM|EISDIR)\b|llama-server.*(?:não encontrado|not found|indisponível)|group policy|política de grupo|programa.*bloqueado|blocked.*policy|not a valid Win32 application|não é um aplicativo Win32 válido/i.test(text);
 }
 
 async function loadEngine(options: any, systemPrompt: string): Promise<unknown> {
@@ -35,7 +35,7 @@ async function loadEngine(options: any, systemPrompt: string): Promise<unknown> 
 
     engineLogger(
       'warn',
-      '[Load] llama-server bloqueado pelo Windows. Ativando motor embarcado node-llama-cpp.'
+      '[Load] llama-server indisponível ou bloqueado. Ativando motor embarcado node-llama-cpp.'
     );
 
     await engine.dispose().catch(() => undefined);

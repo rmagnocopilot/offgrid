@@ -19,10 +19,10 @@ export class ModelInstaller {
     await fsp.mkdir(this.modelsDirectory, { recursive: true });
 
     const target = path.join(this.modelsDirectory, model.fileName);
-    const temporaryTarget = `${target}.partial`;
-    const tempDirectory = path.join(this.modelsDirectory, `.parts-${model.id}-${Date.now()}`);
+    const tempDirectory = path.join(this.modelsDirectory, `.parts-${model.id}-${Date.now()}-${crypto.randomUUID()}`);
+    const temporaryTarget = path.join(tempDirectory, `${model.fileName}.partial`);
+    await recoverInterruptedReplacement(target);
     await fsp.mkdir(tempDirectory, { recursive: true });
-    await fsp.rm(temporaryTarget, { force: true }).catch(() => undefined);
 
     try {
       const parts: string[] = [];
@@ -37,11 +37,18 @@ export class ModelInstaller {
         onProgress({ message: `Baixando parte ${index + 1}/${model.parts.length}: ${part}` });
 
         try {
-          await download(url, destination, percent => {
-            const delta = Math.max(0, percent - lastPercent) / model.parts.length;
-            lastPercent = percent;
-            onProgress({ message: `Baixando ${part}: ${percent}%`, increment: delta });
-          });
+          await downloadWithRetries(
+            url,
+            destination,
+            percent => {
+              const delta = Math.max(0, percent - lastPercent) / model.parts.length;
+              lastPercent = Math.max(lastPercent, percent);
+              onProgress({ message: `Baixando ${part}: ${percent}%`, increment: delta });
+            },
+            (attempt, cause) => onProgress({
+              message: `Falha temporária em ${part}: ${cause}. Nova tentativa ${attempt}/3...`
+            })
+          );
         } catch (error) {
           const cause = error instanceof Error ? error.message : String(error);
           throw new Error(`Falha ao baixar ${part}: ${cause}`);
@@ -61,8 +68,7 @@ export class ModelInstaller {
         throw new Error(`SHA-256 inválido. Esperado ${model.sha256}; recebido ${hash}.`);
       }
 
-      await fsp.rm(target, { force: true });
-      await fsp.rename(temporaryTarget, target);
+      await replaceFilePreservingPrevious(temporaryTarget, target);
       onProgress({ message: 'Modelo instalado e validado.' });
       return target;
     } finally {
@@ -73,15 +79,86 @@ export class ModelInstaller {
 
   async validate(model: ModelDefinition): Promise<{ valid: boolean; actual?: string; expected: string }> {
     const file = path.join(this.modelsDirectory, model.fileName);
+    await recoverInterruptedReplacement(file);
     if (!fs.existsSync(file)) return { valid: false, expected: model.sha256 };
     const actual = await sha256(file);
     return { valid: actual.toLowerCase() === model.sha256.toLowerCase(), actual, expected: model.sha256 };
   }
 
   async remove(model: ModelDefinition): Promise<void> {
-    await fsp.rm(path.join(this.modelsDirectory, model.fileName), { force: true });
-    await fsp.rm(path.join(this.modelsDirectory, `${model.fileName}.partial`), { force: true }).catch(() => undefined);
+    const target = path.join(this.modelsDirectory, model.fileName);
+    await fsp.rm(target, { force: true });
+    await fsp.rm(`${target}.partial`, { force: true }).catch(() => undefined);
+    await fsp.rm(`${target}.backup`, { force: true }).catch(() => undefined);
   }
+}
+
+async function recoverInterruptedReplacement(target: string): Promise<void> {
+  const backup = `${target}.backup`;
+  const targetExists = fs.existsSync(target);
+  const backupExists = fs.existsSync(backup);
+  if (!backupExists) return;
+
+  if (!targetExists) {
+    await fsp.rename(backup, target);
+    return;
+  }
+
+  // A nova versão já foi instalada e o processo caiu antes da limpeza final.
+  await fsp.rm(backup, { force: true });
+}
+
+async function replaceFilePreservingPrevious(source: string, target: string): Promise<void> {
+  await recoverInterruptedReplacement(target);
+  const backup = `${target}.backup`;
+  const hadTarget = fs.existsSync(target);
+  await fsp.rm(backup, { force: true }).catch(() => undefined);
+
+  if (hadTarget) await fsp.rename(target, backup);
+  try {
+    await fsp.rename(source, target);
+    await fsp.rm(backup, { force: true }).catch(() => undefined);
+  } catch (error) {
+    await fsp.rm(target, { force: true }).catch(() => undefined);
+    let restoreError: unknown;
+    if (hadTarget && fs.existsSync(backup)) {
+      try { await fsp.rename(backup, target); }
+      catch (restore) { restoreError = restore; }
+    }
+    const cause = error instanceof Error ? error.message : String(error);
+    if (restoreError) {
+      const restoreCause = restoreError instanceof Error ? restoreError.message : String(restoreError);
+      throw new Error(`${cause} O modelo anterior também não pôde ser restaurado: ${restoreCause}`);
+    }
+    throw error;
+  }
+}
+
+async function downloadWithRetries(
+  url: string,
+  destination: string,
+  onProgress: (percent: number) => void,
+  onRetry: (attempt: number, cause: string) => void,
+  maxAttempts = 3
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await download(url, destination, onProgress);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts) break;
+      const cause = error instanceof Error ? error.message : String(error);
+      onRetry(attempt + 1, cause);
+      await delay(750 * attempt);
+    }
+  }
+  throw lastError ?? new Error('Falha desconhecida durante o download.');
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function merge(parts: string[], destination: string): Promise<void> {

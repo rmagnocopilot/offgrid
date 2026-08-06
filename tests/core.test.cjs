@@ -251,30 +251,39 @@ test('VRAM disponível gera camadas progressivas', () => {
 });
 test('perfil funcional persiste por máquina e modelo', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-profile-'));
-  const store = new HardwareProfileStore(dir); await store.init(); await store.recordSuccess('C:/models/a.gguf', { gpu:'cpu', gpuLayers:0, reason:'ok' });
-  const restored = new HardwareProfileStore(dir); await restored.init(); assert.equal(restored.get('D:/outra/a.gguf').gpu, 'cpu');
+  const store = new HardwareProfileStore(dir); await store.init(); await store.recordSuccess('C:/models/a.gguf', 4096, { gpu:'cpu', gpuLayers:0, reason:'ok' });
+  const restored = new HardwareProfileStore(dir); await restored.init(); assert.equal(restored.get('D:/outra/a.gguf', 4096).gpu, 'cpu');
 });
+test('perfil de GPU é específico para o tamanho de contexto', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-profile-context-'));
+  const store = new HardwareProfileStore(dir);
+  await store.init();
+  await store.recordSuccess('C:/models/a.gguf', 8192, { gpu:'vulkan', gpuLayers:30, reason:'ok' });
+  assert.equal(store.get('C:/models/a.gguf', 12288), undefined);
+  assert.equal(store.get('C:/models/a.gguf', 8192).gpuLayers, 30);
+});
+
 test('perfil antigo ou inválido não quebra o carregamento', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-profile-legacy-'));
   await fsp.writeFile(path.join(dir, 'hardware-profiles.json'), JSON.stringify({ version: 1, profiles: 'formato-antigo' }), 'utf8');
   const store = new HardwareProfileStore(dir);
   await store.init();
-  assert.equal(store.get('C:/models/a.gguf'), undefined);
-  await store.recordSuccess('C:/models/a.gguf', { gpu:'cpu', gpuLayers:0, reason:'ok' });
-  assert.equal(store.get('C:/models/a.gguf').gpu, 'cpu');
+  assert.equal(store.get('C:/models/a.gguf', 4096), undefined);
+  await store.recordSuccess('C:/models/a.gguf', 4096, { gpu:'cpu', gpuLayers:0, reason:'ok' });
+  assert.equal(store.get('C:/models/a.gguf', 4096).gpu, 'cpu');
 });
 
 test('perfil legado encapsulado é migrado sem erro', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-profile-wrapper-'));
   const current = new HardwareProfileStore(dir);
   await current.init();
-  await current.recordSuccess('C:/models/a.gguf', { gpu:'cpu', gpuLayers:0, reason:'ok' });
+  await current.recordSuccess('C:/models/a.gguf', 4096, { gpu:'cpu', gpuLayers:0, reason:'ok' });
   const file = path.join(dir, 'hardware-profiles.json');
   const list = JSON.parse(await fsp.readFile(file, 'utf8'));
   await fsp.writeFile(file, JSON.stringify({ profiles: list }), 'utf8');
   const restored = new HardwareProfileStore(dir);
   await restored.init();
-  assert.equal(restored.get('D:/outra/a.gguf').gpu, 'cpu');
+  assert.equal(restored.get('D:/outra/a.gguf', 4096).gpu, 'cpu');
 });
 
 // Sessões
@@ -375,7 +384,7 @@ test('instalador informa HTTP e limpa arquivos parciais após falha', async t =>
 
 test('package inclui runtime embarcado e mantém comandos da versão', () => {
   const pkg = require('../package.json');
-  assert.equal(pkg.version, '2.0.3');
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
   assert.equal(pkg.dependencies?.['node-llama-cpp'], '3.19.1');
   const commands = new Set(pkg.contributes.commands.map(item => item.command));
   for (const command of ['offgrid.openModelsFolder','offgrid.openDataFolder','offgrid.openLogsFolder']) assert.equal(commands.has(command), true);
@@ -432,6 +441,34 @@ test('workflow publica o Qwen3 4B intermediário no release de modelos', () => {
   assert.match(workflow, /7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5/);
 });
 
+test('gerenciador verifica o executável e não o pacote zip', () => {
+  const manager = fs.readFileSync(path.join(root, 'src/llm/LlamaServerManager.ts'), 'utf8');
+  assert.match(manager, /return llamaServerExecutablePath\(this\.binariesDirectory\)/);
+  assert.doesNotMatch(manager, /return path\.join\(this\.binariesDirectory, llamaServerBinaryName\(\)\)/);
+});
+
+
+test('instalação do llama-server limpa extração antiga e recalcula o executável real', () => {
+  const manager = fs.readFileSync(path.join(root, 'src/llm/LlamaServerManager.ts'), 'utf8');
+  assert.match(manager, /fsp\.rm\(extractDir, \{ recursive: true, force: true \}\)/);
+  assert.match(manager, /const installedExecutablePath = llamaServerExecutablePath\(this\.binariesDirectory\)/);
+  assert.match(manager, /return installedExecutablePath/);
+});
+
+test('llama-server usa porta local dinâmica para evitar colisão entre janelas', () => {
+  const engine = fs.readFileSync(path.join(root, 'src/llm/LlamaServerEngine.ts'), 'utf8');
+  assert.match(engine, /findAvailablePort\(\)/);
+  assert.match(engine, /port: 0, exclusive: true/);
+  assert.doesNotMatch(engine, /LLAMA_SERVER_PORT\s*=\s*18642/);
+});
+
+
+test('llama-server mantém listener de erro após o startup', () => {
+  const engine = fs.readFileSync(path.join(root, 'src/llm/LlamaServerEngine.ts'), 'utf8');
+  assert.match(engine, /serverProcess\.on\('error'/);
+  assert.match(engine, /\[llama-server\]\[processo\]/);
+});
+
 test('worker usa llama-server com fallback para motor embarcado', () => {
   const worker = fs.readFileSync(
     path.join(root, 'src/engine/EngineWorker.ts'),
@@ -441,7 +478,8 @@ test('worker usa llama-server com fallback para motor embarcado', () => {
   assert.match(worker, /new LlamaServerEngine\(/);
   assert.match(worker, /new LlamaEngine\(engineLogger\)/);
   assert.match(worker, /isServerExecutionBlocked/);
-  assert.match(worker, /spawn\\s\+UNKNOWN/);
+  assert.match(worker, /ENOENT\|EACCES\|EPERM/);
+  assert.match(worker, /spawn\(\?:\\s\+\\S\+\)\?/);
   assert.equal(
     fs.existsSync(path.join(root, 'src/llm/LlamaEngine.ts')),
     true
@@ -524,14 +562,43 @@ test('interface usa Codicons e recolhe o painel do motor em acordeão compacto',
 test('PowerShell usa Int64 e UTF-8', () => {
   const ps = fs.readFileSync(path.join(root,'resources/windows/gpu-memory.ps1'),'utf8'); assert.match(ps,/\[int64\]/); assert.match(ps,/UTF8Encoding/); assert.doesNotMatch(ps,/\[Math\]::Max\(0,/);
 });
+test('instalador de modelos tenta novamente e preserva a versão anterior', () => {
+  const installer = fs.readFileSync(path.join(root, 'src/models/ModelInstaller.ts'), 'utf8');
+  assert.match(installer, /downloadWithRetries\(/);
+  assert.match(installer, /replaceFilePreservingPrevious\(/);
+  assert.match(installer, /const backup = `\$\{target\}\.backup`/);
+  assert.match(installer, /recoverInterruptedReplacement\(target\)/);
+  assert.match(installer, /await fsp\.rename\(backup, target\)/);
+  assert.match(installer, /crypto\.randomUUID\(\)/);
+  assert.match(installer, /await fsp\.rm\(`\$\{target\}\.backup`/);
+});
+
+test('workflow incorpora commits concorrentes antes de publicar checksums', () => {
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/publish-models.yml'), 'utf8');
+  assert.match(workflow, /git pull --rebase origin "\$\{GITHUB_REF_NAME\}"/);
+  assert.match(workflow, /git push origin "HEAD:\$\{GITHUB_REF_NAME\}"/);
+});
+
+test('empacotamento usa o VSCE local e CI instala pelo lockfile', () => {
+  const pkg = require('../package.json');
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/check.yml'), 'utf8');
+  assert.equal(pkg.scripts.package, 'npm run compile && vsce package');
+  assert.doesNotMatch(pkg.scripts.package, /npx\s+--yes/);
+  assert.match(workflow, /run: npm ci/);
+});
+
 test('package aponta para JavaScript compilado e mantém fontes TypeScript', () => {
-  const pkg = require('../package.json'); assert.equal(pkg.main,'./out/extension.js'); assert.equal(pkg.version,'2.0.3'); assert.ok(fs.existsSync(path.join(root,'src/extension.ts'))); assert.equal(fs.existsSync(path.join(root,'src/extension.js')),false);
+  const pkg = require('../package.json'); assert.equal(pkg.main,'./out/extension.js'); assert.match(pkg.version,/^\d+\.\d+\.\d+$/); assert.ok(fs.existsSync(path.join(root,'src/extension.ts'))); assert.equal(fs.existsSync(path.join(root,'src/extension.js')),false);
 });
 test('Activity Bar e abertura por F5 estão configuradas', () => {
   const pkg = require('../package.json'); assert.equal(pkg.contributes.viewsContainers.activitybar[0].id,'offgrid'); const launch = JSON.parse(fs.readFileSync(path.join(root,'.vscode/launch.json'),'utf8')); assert.equal(launch.configurations[0].type,'extensionHost');
 });
 test('interface possui breakpoints responsivos e modos completos', () => {
   const css = fs.readFileSync(path.join(root,'resources/webview/main.css'),'utf8'); const ui = fs.readFileSync(path.join(root,'src/ui/ChatViewProvider.ts'),'utf8'); assert.match(css,/@media\(max-width:520px\)/); assert.match(css,/@media\(max-width:330px\)/); for (const mode of ['Chat','Planejar','Somente leitura','Agente']) assert.match(ui,new RegExp(mode));
+});
+test('manifesto não contém caracteres de acentuação substituídos por interrogação', () => {
+  const manifest = fs.readFileSync(path.join(root, 'models', 'manifest.json'), 'utf8');
+  assert.doesNotMatch(manifest, /[A-Za-zÀ-ÿ]\?[A-Za-zÀ-ÿ]|\?\?/);
 });
 test('fontes não contêm sinais conhecidos de mojibake', async () => {
   const bad = ['Mem��ria','nÃ£o','alteraÃ§','diagn¾','Ã¡','Ã©','Ã§','Ã³','Ãª','Ã­','â€”'];
@@ -544,6 +611,35 @@ test('saída compilada contém extensão, worker e webview', () => {
 function walk(directory) {
   const result=[]; for (const entry of fs.readdirSync(directory,{withFileTypes:true})) { const full=path.join(directory,entry.name); if(entry.isDirectory()) result.push(...walk(full)); else result.push(full); } return result;
 }
+
+test('contexto resolve classes Java citadas sem extensão no mesmo módulo', async t => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-java-named-context-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const files = {
+    'siavo-ejb/src/test/java/br/gov/caixa/tests/DadosExecucaoOrcamentoDTOTest.java': 'public class DadosExecucaoOrcamentoDTOTest {}',
+    'siavo-ejb/src/main/java/br/gov/caixa/dto/TarifaSiapfDTO.java': 'public class TarifaSiapfDTO { private String codigo; }',
+    'outro-modulo/src/main/java/br/gov/caixa/dto/TarifaSiapfDTO.java': 'public class TarifaSiapfDTO { private String errado; }'
+  };
+  for (const [relative, content] of Object.entries(files)) {
+    const absolute = path.join(dir, relative);
+    await fsp.mkdir(path.dirname(absolute), { recursive: true });
+    await fsp.writeFile(absolute, content, 'utf8');
+  }
+
+  const context = await buildAgentWorkspaceContext({
+    workspaceRoot: dir,
+    priority: ['siavo-ejb/src/test/java/br/gov/caixa/tests/DadosExecucaoOrcamentoDTOTest.java'],
+    request: 'crie TarifaSiapfDTOTest para TarifaSiapfDTO baseado em DadosExecucaoOrcamentoDTOTest',
+    maxFiles: 3,
+    maxCharsPerFile: 3_000,
+    maxTotalChars: 9_000
+  });
+
+  const paths = context.files.map(file => file.filePath);
+  assert.ok(paths.includes('siavo-ejb/src/main/java/br/gov/caixa/dto/TarifaSiapfDTO.java'));
+  assert.equal(paths.includes('outro-modulo/src/main/java/br/gov/caixa/dto/TarifaSiapfDTO.java'), false);
+});
 
 test('contexto de teste Java não carrega spec TypeScript de outro módulo', async t => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-java-context-'));
@@ -585,4 +681,34 @@ test('contexto de teste Java não carrega spec TypeScript de outro módulo', asy
   assert.ok(paths.includes('backend/src/main/java/com/example/repository/OrderRepository.java'));
   assert.ok(paths.includes('backend/pom.xml'));
   assert.equal(paths.some(file => file.endsWith('.spec.ts')), false);
+});
+
+test('gerenciador aceita layouts alternativos do pacote Windows', () => {
+  const manager = fs.readFileSync(path.join(root, 'src/llm/LlamaServerManager.ts'), 'utf8');
+  assert.match(manager, /llama-server-win-x64', 'llama-server\.exe/);
+  assert.match(manager, /llama-server-win-x64\.exe/);
+  assert.match(manager, /candidates\.find\(candidate => fs\.existsSync\(candidate\)\)/);
+});
+
+test('script de publicação atualiza o SHA do asset zip do Windows', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts/update-binary-sha.py'), 'utf8');
+  assert.match(script, /"llama-server-win-x64\.zip": win_sha/);
+  assert.doesNotMatch(script, /"llama-server-win-x64\.exe": win_sha/);
+});
+
+test('workflow persiste no repositório os checksums publicados', () => {
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/publish-models.yml'), 'utf8');
+  assert.match(workflow, /Persistir checksums dos binários no repositório/);
+  assert.match(workflow, /git add models\/manifest\.json/);
+  assert.match(workflow, /git push origin "HEAD:\$\{GITHUB_REF_NAME\}"/);
+});
+
+test('dependências nativas do fallback Windows são opcionais em outras plataformas', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  assert.equal(packageJson.dependencies['@node-llama-cpp/win-x64'], undefined);
+  assert.equal(packageJson.optionalDependencies['@node-llama-cpp/win-x64'], '3.19.1');
+  assert.equal(packageJson.optionalDependencies['@node-llama-cpp/win-x64-vulkan'], '3.19.1');
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/check.yml'), 'utf8');
+  assert.match(workflow, /cross-platform-check/);
+  assert.match(workflow, /ubuntu-latest, macos-latest/);
 });

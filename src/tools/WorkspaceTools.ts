@@ -74,8 +74,38 @@ export class WorkspaceTools {
   }
 
   async acceptChanges(): Promise<string[]> {
-    const files = [...this.staged.keys()];
-    for (const relative of files) await this.acceptChange(relative, false);
+    this.requireWorkspace();
+    const entries = [...this.staged.entries()];
+    const files = entries.map(([relative]) => relative);
+    const applied: Array<[string, StagedEntry]> = [];
+
+    try {
+      // Valida todos os arquivos antes da primeira gravação para não sobrescrever
+      // edições feitas pelo usuário enquanto a revisão estava aberta.
+      for (const [relative, entry] of entries) {
+        await this.assertEntryUnchanged(relative, entry);
+      }
+      for (const [relative, entry] of entries) {
+        applied.push([relative, entry]);
+        await this.writeEntry(relative, entry);
+      }
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      for (const [relative, entry] of applied.reverse()) {
+        try {
+          await this.restoreEntry(relative, entry);
+        } catch (rollbackError) {
+          rollbackErrors.push(`${relative}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+        }
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(rollbackErrors.length
+        ? `${message} Falha adicional ao reverter alterações: ${rollbackErrors.join('; ')}`
+        : message);
+    }
+
+    this.staged.clear();
+    this.reviewSummary = '';
     await vscode.commands.executeCommand('workbench.action.files.saveAll');
     return files;
   }
@@ -85,6 +115,7 @@ export class WorkspaceTools {
     const relative = normalizeRelativePath(filePath);
     const entry = this.staged.get(relative);
     if (!entry) throw new Error(`Alteração não encontrada: ${relative}`);
+    await this.assertEntryUnchanged(relative, entry);
     await this.writeEntry(relative, entry);
     this.staged.delete(relative);
     if (!this.staged.size) this.reviewSummary = '';
@@ -329,7 +360,16 @@ export class WorkspaceTools {
     this.requireWorkspace();
     const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
     assertNoSymlinkEscape(this.workspaceRoot!, absolute);
-    const original = await this.currentContent(relative);
+    const previous = this.staged.get(relative);
+    if (previous?.delete) throw new Error(`A exclusão de ${relative} já foi preparada.`);
+    if (previous && !previous.existed) {
+      // Criar e excluir o mesmo arquivo antes da revisão equivale a cancelar a
+      // criação; não transforme isso em uma exclusão de arquivo inexistente.
+      this.staged.delete(relative);
+      return { staged: false, cancelledCreation: true, filePath: relative };
+    }
+    if (!previous && !fs.existsSync(absolute)) throw new Error(`Arquivo não encontrado: ${relative}`);
+    const original = previous?.original ?? await fsp.readFile(absolute, 'utf8');
     const approved = await this.approval.confirmFileDeletion(relative, reason, this.autonomy());
     if (!approved) throw new Error('Exclusão rejeitada pelo usuário.');
     this.staged.set(relative, { content: '', original, existed: true, delete: true });
@@ -341,7 +381,14 @@ export class WorkspaceTools {
     if (from === to) throw new Error('O novo caminho é igual ao atual.');
     const content = await this.currentContent(from);
     await this.stageFile(to, content, false, `Renomeado de ${from}`);
-    await this.stageDelete(from, `Renomeado para ${to}`);
+    try {
+      await this.stageDelete(from, `Renomeado para ${to}`);
+    } catch (error) {
+      // Rename é uma única intenção. Se a exclusão da origem falhar ou for
+      // recusada, não deixe a criação do destino preparada como uma cópia.
+      this.staged.delete(to);
+      throw error;
+    }
     return { staged: true, renamed: true, from, to };
   }
   private async runTerminal(command: string): Promise<unknown> {
@@ -356,6 +403,7 @@ export class WorkspaceTools {
     this.requireWorkspace();
     const relative = normalizeRelativePath(filePath);
     const staged = this.staged.get(relative);
+    if (staged?.delete) throw new Error(`O arquivo ${relative} já está preparado para exclusão.`);
     if (staged) return staged.content;
     return fsp.readFile(resolveInsideRoot(this.workspaceRoot!, relative), 'utf8');
   }
@@ -365,6 +413,32 @@ export class WorkspaceTools {
     await fsp.mkdir(path.dirname(destination), { recursive: true });
     await fsp.writeFile(destination, content, 'utf8');
   }
+  private async assertEntryUnchanged(relative: string, entry: StagedEntry): Promise<void> {
+    const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
+    assertNoSymlinkEscape(this.workspaceRoot!, absolute);
+    const exists = fs.existsSync(absolute);
+    if (!entry.existed) {
+      if (exists) throw new Error(`O arquivo ${relative} foi criado fora da revisão. Reabra a proposta antes de sobrescrevê-lo.`);
+      return;
+    }
+    if (!exists) throw new Error(`O arquivo ${relative} foi removido fora da revisão. Reabra a proposta.`);
+    const current = await fsp.readFile(absolute, 'utf8');
+    if (current !== entry.original) {
+      throw new Error(`O arquivo ${relative} mudou desde que a revisão foi preparada. Reabra a proposta para evitar perda de dados.`);
+    }
+  }
+
+  private async restoreEntry(relative: string, entry: StagedEntry): Promise<void> {
+    const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
+    assertNoSymlinkEscape(this.workspaceRoot!, absolute);
+    if (!entry.existed) {
+      await fsp.rm(absolute, { force: true });
+      return;
+    }
+    await fsp.mkdir(path.dirname(absolute), { recursive: true });
+    await fsp.writeFile(absolute, entry.original, 'utf8');
+  }
+
   private async writeEntry(relative: string, entry: StagedEntry): Promise<void> {
     if (isWriteProtectedPath(relative)) throw new Error(`Escrita bloqueada: ${relative}`);
     const absolute = resolveInsideRoot(this.workspaceRoot!, relative);
@@ -375,7 +449,7 @@ export class WorkspaceTools {
       await fsp.mkdir(path.dirname(absolute), { recursive: true });
       await fsp.writeFile(absolute, entry.content, 'utf8');
     }
-  } 
+  }
   private async loadMemory(): Promise<void> { if (this.memoryFile) try { this.memory = JSON.parse(await fsp.readFile(this.memoryFile, 'utf8')); } catch { this.memory = []; } }
   private requireWorkspace(): void { if (!this.workspaceRoot) throw new Error('Nenhum workspace aberto.'); }
 }

@@ -154,11 +154,12 @@ export class LlamaEngine {
       } catch (introspectError) {
         this.log('debug', `[Load][Introspecção] Falhou: ${introspectError instanceof Error ? introspectError.message : String(introspectError)}`);
       }
-      this.session = createQwenSession(runtime, this.sequence, systemPrompt);
+      const effectiveSystemPrompt = this.withPromptMode(systemPrompt, options.promptMode);
+      this.session = createQwenSession(runtime, this.sequence, effectiveSystemPrompt);
       this.options = options;
-      this.systemPrompt = systemPrompt;
+      this.systemPrompt = effectiveSystemPrompt;
       this.state = 'ready';
-      this.log('debug', `[Load] LlamaChatSession criada com systemPrompt de chat. chars=${systemPrompt.length} tokens≈${this.countTokens(systemPrompt)}`);
+      this.log('debug', `[Load] LlamaChatSession criada com systemPrompt de chat. chars=${effectiveSystemPrompt.length} tokens≈${this.countTokens(effectiveSystemPrompt)}`);
       this.log('info', `[Load] Modelo carregado. Backend efetivo: ${this.diagnostics.backend}`);
       this.log('debug', `[Perf] loadModel: ${Date.now() - started} ms`);
       return this.diagnostics;
@@ -228,11 +229,12 @@ export class LlamaEngine {
   async startAgent(systemPrompt: string): Promise<void> {
     await this.enqueue(async () => {
       this.ensureLoaded();
+      const effectiveSystemPrompt = this.withPromptMode(systemPrompt, this.options?.promptMode);
       const kvTokensBefore = this.sequence?.nextTokenIndex ?? 0;
       this.log('debug', [
         '[Agent][startAgent] Iniciando.',
         `systemPromptAnterior=chat chars=${this.systemPrompt.length} tokens≈${this.countTokens(this.systemPrompt)}`,
-        `systemPromptNovo=agente chars=${systemPrompt.length} tokens≈${this.countTokens(systemPrompt)}`,
+        `systemPromptNovo=agente chars=${effectiveSystemPrompt.length} tokens≈${this.countTokens(effectiveSystemPrompt)}`,
         `sequenceAcquisitions=${this.sequenceAcquisitions}`,
         `kvCacheTokens=${kvTokensBefore}`
       ].join(' | '));
@@ -265,16 +267,16 @@ export class LlamaEngine {
       // causam estado inconsistente e travam session.prompt().
       try { sessionAnterior?.dispose({ disposeSequence: false }); } catch { /* ignorar */ }
       this.log('debug', `[Agent][startAgent] Sessão anterior descartada. disposed=${sessionAnterior?.disposed ?? 'n/a'}`);
-      this.session = createQwenSession(runtime, this.sequence, systemPrompt);
+      this.session = createQwenSession(runtime, this.sequence, effectiveSystemPrompt);
       this.agentActive = true;
-      this.agentSystemPrompt = systemPrompt;
+      this.agentSystemPrompt = effectiveSystemPrompt;
       this.log('debug', [
         '[Agent][startAgent] Sessão recriada com sucesso.',
         `sessionOk=${Boolean(this.session)}`,
         `agentActive=${this.agentActive}`,
         `wrapper=${this.session?.chatWrapper?.wrapperName ?? 'desconhecido'}`,
         `kvApos=${this.sequence?.nextTokenIndex ?? 0}`,
-        `tokens≈${this.countTokens(systemPrompt)}`
+        `tokens≈${this.countTokens(effectiveSystemPrompt)}`
       ].join(' '));
     });
   }
@@ -304,7 +306,12 @@ export class LlamaEngine {
       const promptTokens = this.countTokens(prompt);
       const chatOverheadTokens = 32;
       const safetyTokens = Math.max(48, Math.floor(contextSize * 0.04));
-      const usedInputTokens = sessionSystemTokens + promptTokens + chatOverheadTokens;
+      const kvTokensAtStep = Math.max(0, Number(this.sequence?.nextTokenIndex ?? 0));
+      // A sessão embarcada mantém os turns anteriores no KV cache. Contar apenas
+      // o prompt atual superestimava a saída disponível nas etapas seguintes.
+      const freshSessionInputTokens = sessionSystemTokens + promptTokens + chatOverheadTokens;
+      const accumulatedInputTokens = kvTokensAtStep + promptTokens + chatOverheadTokens;
+      const usedInputTokens = Math.max(freshSessionInputTokens, accumulatedInputTokens);
       const availableOutputTokens = contextSize - usedInputTokens - safetyTokens;
       const requestedMaxTokens = Math.max(
         1,
@@ -345,7 +352,6 @@ export class LlamaEngine {
       // Monitora o crescimento do KV cache ao longo dos steps do Agente.
       // O histórico da sessão acumula turns; em loops longos o contexto pode
       // encher e disparar context shift automático (que descarta turns antigos).
-      const kvTokensAtStep = this.sequence?.nextTokenIndex ?? 0;
       const kvUsagePercent = Math.round((kvTokensAtStep / contextSize) * 100);
       if (kvUsagePercent >= 75) {
         this.log('warn', `[Agent][KV] Contexto em ${kvUsagePercent}% (${kvTokensAtStep}/${contextSize} tokens). Context shift automático pode descartar turns antigos.`);
@@ -576,6 +582,13 @@ export class LlamaEngine {
   async dispose(): Promise<void> {
     try { await this.unload(); }
     catch { await this.disposeResources('encerramento forçado', false); }
+  }
+
+  private withPromptMode(systemPrompt: string, promptMode: EngineLoadOptions['promptMode']): string {
+    if (promptMode !== 'no-think') return systemPrompt;
+    return systemPrompt.includes('/no_think') ? systemPrompt : `${systemPrompt}
+
+/no_think`;
   }
 
   private ensureLoaded(): void {

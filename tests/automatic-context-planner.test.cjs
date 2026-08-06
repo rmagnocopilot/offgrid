@@ -122,11 +122,15 @@ test('catálogo substitui 1.5B pelo Qwen3 4B e define no-think', () => {
   assert.equal(qwen4b.sha256, '7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5');
 });
 
-test('modo no-think é aplicado no chat e no agente pelo motor', () => {
-  const engine = fs.readFileSync(path.join(root, 'src', 'llm', 'LlamaServerEngine.ts'), 'utf8');
-  assert.match(engine, /withPromptMode\(systemPrompt, options\.promptMode\)/);
-  assert.match(engine, /withPromptMode\(systemPrompt, this\.options\?\.promptMode\)/);
-  assert.match(engine, /\/no_think/);
+test('modo no-think é aplicado no chat e no agente pelos dois motores', () => {
+  const server = fs.readFileSync(path.join(root, 'src', 'llm', 'LlamaServerEngine.ts'), 'utf8');
+  const embedded = fs.readFileSync(path.join(root, 'src', 'llm', 'LlamaEngine.ts'), 'utf8');
+  for (const engine of [server, embedded]) {
+    assert.match(engine, /withPromptMode\(systemPrompt, options\.promptMode\)/);
+    assert.match(engine, /withPromptMode\(systemPrompt, this\.options\?\.promptMode\)/);
+    assert.match(engine, /\/no_think/);
+  }
+  assert.match(embedded, /accumulatedInputTokens = kvTokensAtStep \+ promptTokens/);
 });
 
 test('FastPaths são avaliados antes da ampliação automática de contexto', () => {
@@ -134,6 +138,15 @@ test('FastPaths são avaliados antes da ampliação automática de contexto', ()
   const fastPath = extension.indexOf('tryPrepareFullStackRelationRefactorFastPath');
   const planner = extension.indexOf('const taskContextEstimate = estimateTaskComplexity');
   assert.ok(fastPath >= 0 && planner > fastPath);
+});
+
+test('criação de um único arquivo não amplia o contexto como tarefa multi-arquivo', () => {
+  const estimate = estimateTaskComplexity({
+    request: 'Crie TarifaSiapfDTOTest para TarifaSiapfDTO.',
+    estimatedFiles: 1,
+    createsFiles: true
+  });
+  assert.equal(estimate.complexity, 'simple');
 });
 
 test('dois arquivos estimados já caracterizam tarefa multi-arquivo', () => {
@@ -146,7 +159,7 @@ test('dois arquivos estimados já caracterizam tarefa multi-arquivo', () => {
 
 test('tarefa simples limita o contexto automático do workspace a um arquivo', () => {
   const extension = fs.readFileSync(path.join(root, 'src', 'extension.ts'), 'utf8');
-  assert.match(extension, /taskContextEstimate\.complexity === 'simple'[\s\S]*?\? 1[\s\S]*?: budget\.maxFiles/);
+  assert.match(extension, /taskContextEstimate\.complexity === 'simple'[\s\S]*?genericFileCreationTask[\s\S]*?Math\.min\(3, budget\.maxFiles\)[\s\S]*?: 1[\s\S]*?: budget\.maxFiles/);
   assert.match(extension, /maxFiles: effectiveMaxFiles/);
 });
 
@@ -165,4 +178,25 @@ test('não amplia 3B para 8192 quando a margem extra de reinício é pequena', (
   assert.equal(result.contextSize, 4096);
   assert.equal(result.constrainedByMemory, true);
   assert.equal(shouldExpandContext(4096, result), false);
+});
+
+
+test('não soma duas vezes a memória recuperável do motor atual', () => {
+  const qwen4b = model('qwen3-4b', 4, 8192, 8192, 12288, 2.5);
+  const result = planContext({
+    mode: 'automatic',
+    manualContextSize: 4096,
+    model: qwen4b,
+    modelFileSizeBytes: 2.5 * GIB,
+    resources: {
+      ...resources(32, 3),
+      engineRam: { pid: 10, workingSetBytes: 2 * GIB }
+    },
+    currentContextSize: 8192,
+    reclaimableBytes: 6 * GIB,
+    task: { complexity: 'complex', estimatedFiles: 8, reason: 'teste' }
+  });
+
+  assert.equal(result.availableBytes, 5 * GIB);
+  assert.equal(shouldExpandContext(8192, result), false);
 });

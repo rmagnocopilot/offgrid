@@ -2,7 +2,7 @@
   "name": "offgrid",
   "displayName": "Offgrid",
   "description": "Assistente de programação local e offline para VS Code, com Chat, Agente por ferramentas, modelos GGUF e revisão visual.",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "publisher": "rmagnocopilot",
   "license": "MIT",
   "engines": {
@@ -36,7 +36,7 @@
     "watch": "tsc -watch -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run compile && node --test",
-    "package": "npm run compile && npx --yes @vscode/vsce package",
+    "package": "npm run compile && vsce package",
     "vscode:prepublish": "npm run compile"
   },
   "contributes": {
@@ -311,8 +311,6 @@
     }
   },
   "dependencies": {
-    "@node-llama-cpp/win-x64": "3.19.1",
-    "@node-llama-cpp/win-x64-vulkan": "3.19.1",
     "node-llama-cpp": "3.19.1",
     "typescript": "^5.8.3"
   },
@@ -323,5 +321,9 @@
   },
   "allowScripts": {
     "node-llama-cpp@3.19.1": true
+  },
+  "optionalDependencies": {
+    "@node-llama-cpp/win-x64": "3.19.1",
+    "@node-llama-cpp/win-x64-vulkan": "3.19.1"
   }
 }

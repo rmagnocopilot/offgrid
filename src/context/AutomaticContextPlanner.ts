@@ -70,7 +70,7 @@ export function estimateTaskComplexity(params: {
     'backend e frontend', 'model e service', 'dto e service'
   ].some(fragment => normalized.includes(fragment));
 
-  if (params.multiLayer || params.createsFiles || multiByText || estimatedFiles >= 2) {
+  if (params.multiLayer || multiByText || estimatedFiles >= 2) {
     return {
       complexity: 'multiFile',
       estimatedFiles,
@@ -93,11 +93,18 @@ export function planContext(input: ContextPlanInput): ContextPlan {
         ? profile.complex
         : profile.base;
 
+  const engineWorkingSetBytes = Math.max(0, input.resources.engineRam?.workingSetBytes ?? 0);
+  const estimatedReclaimableBytes = Math.max(0, input.reclaimableBytes ?? 0);
+  // A RAM livre já exclui o processo atual do motor. Ao trocar/recarregar o
+  // modelo, somente essa memória volta a ficar disponível. Somar working set e
+  // uma segunda estimativa do mesmo modelo inflava o orçamento e autorizava
+  // expansões que deixavam RAM/VRAM praticamente esgotadas.
+  const recoverableEngineBytes = engineWorkingSetBytes > 0
+    ? engineWorkingSetBytes
+    : estimatedReclaimableBytes;
   const availableBytes = Math.max(
     0,
-    input.resources.systemRam.freeBytes
-      + (input.resources.engineRam?.workingSetBytes ?? 0)
-      + Math.max(0, input.reclaimableBytes ?? 0)
+    input.resources.systemRam.freeBytes + recoverableEngineBytes
   );
   const reserveBytes = Math.min(3 * GIB, Math.max(1.25 * GIB, input.resources.systemRam.totalBytes * 0.15));
 

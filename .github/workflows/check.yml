@@ -13,7 +13,7 @@ jobs:
         with:
           node-version: '20'
       - name: Instalar dependências
-        run: npm install
+        run: npm ci
       - name: Verificar TypeScript
         run: npm run check
       - name: Testar
@@ -24,3 +24,20 @@ jobs:
         with:
           name: offgrid-vsix
           path: '*.vsix'
+
+  cross-platform-check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Instalar sem binários opcionais
+        run: npm ci --ignore-scripts --omit=optional
+      - name: Verificar TypeScript
+        run: npm run check
+      - name: Testar
+        run: npm test

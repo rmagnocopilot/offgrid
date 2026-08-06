@@ -16,6 +16,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as http from 'node:http';
+import * as net from 'node:net';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type {
   EngineDiagnostics,
@@ -50,19 +51,21 @@ interface SseDelta { content?: string }
 interface SseChoice { delta: SseDelta; finish_reason: string | null }
 interface SseChunk { choices: SseChoice[] }
 
-const LLAMA_SERVER_PORT = 18642; // porta fixa local, improvável de colidir
 const HEALTH_TIMEOUT_MS = 60_000; // aguardar até 60s para o servidor ficar pronto
 const HEALTH_POLL_MS = 300;
 
 export class LlamaServerEngine {
   private serverProcess?: ChildProcess;
   private serverReady = false;
+  private serverPort = 0;
+  private effectiveBackend: EffectiveBackend = 'cpu';
   private options?: EngineLoadOptions;
   private serverBinaryPath = '';
   private chatSystemPrompt = '';   // system prompt de chat
   private agentSystemPrompt = '';  // system prompt do agente (enquanto ativo)
   private agentActive = false;
   private chatHistory: ChatMessage[] = [];
+  private agentHistory: ChatMessage[] = [];
   private loading = false;
   private state: EngineDiagnostics['engineState'] = 'notStarted';
   private lastError: string | null = null;
@@ -89,7 +92,7 @@ export class LlamaServerEngine {
       engineState: this.state,
       agentActive: this.agentActive,
       modelPath: this.options?.modelPath ?? '',
-      backend: 'cpu' as EffectiveBackend,
+      backend: this.effectiveBackend,
       contextSize: this.options?.contextSize ?? null,
       gpuLayers: this.options?.gpuLayers ?? 'auto',
       sequenceAcquisitions: 0,
@@ -144,25 +147,42 @@ export class LlamaServerEngine {
       this.chatHistory = [];
       this.agentActive = false;
       this.agentSystemPrompt = '';
+      this.agentHistory = [];
+
+      // Cada janela do VS Code recebe uma porta própria. A porta fixa anterior
+      // podia conectar ao servidor de outra janela e usar o modelo errado.
+      this.serverPort = await findAvailablePort();
+      this.effectiveBackend = requestedEffectiveBackend(options);
+      this.options = options;
 
       // Monta argumentos do llama-server
       const args = this.buildServerArgs(options);
-      this.log('debug', `[Load] Iniciando llama-server. args=${args.join(' ')}`);
+      this.log('debug', `[Load] Iniciando llama-server. porta=${this.serverPort} args=${args.join(' ')}`);
 
       this.serverProcess = spawn(this.serverBinaryPath, args, {
         stdio: ['ignore', 'pipe', 'pipe']
+      });
+      this.serverProcess.on('error', (error: Error) => {
+        this.lastError = error.stack ?? error.message;
+        this.log('warn', `[llama-server][processo] ${error.message}`);
+        if (this.serverReady) {
+          this.serverReady = false;
+          this.state = 'error';
+        }
       });
 
       // Captura logs do servidor
       this.serverProcess.stdout?.on('data', (chunk: Buffer) => {
         const lines = chunk.toString().split('\n').filter(Boolean);
         for (const line of lines) {
+          this.captureEffectiveBackend(line);
           this.log('debug', `[llama-server][stdout] ${line}`);
         }
       });
       this.serverProcess.stderr?.on('data', (chunk: Buffer) => {
         const lines = chunk.toString().split('\n').filter(Boolean);
         for (const line of lines) {
+          this.captureEffectiveBackend(line);
           // llama-server escreve tudo no stderr — filtra para warn só erros reais
           const level = line.toLowerCase().includes('error') ? 'warn' : 'debug';
           this.log(level, `[llama-server][stderr] ${line}`);
@@ -190,9 +210,8 @@ export class LlamaServerEngine {
       // Aguarda o servidor aceitar conexões
       await this.waitForServer();
 
-      this.options = options;
       this.state = 'ready';
-      this.log('info', `[Load] llama-server pronto em ${Date.now() - started} ms. Backend: cpu`);
+      this.log('info', `[Load] llama-server pronto em ${Date.now() - started} ms. Backend: ${this.effectiveBackend}`);
       return this.diagnostics;
     } catch (error) {
       this.lastError = error instanceof Error ? error.stack ?? error.message : String(error);
@@ -208,7 +227,7 @@ export class LlamaServerEngine {
   private buildServerArgs(options: EngineLoadOptions): string[] {
     const args = [
       '--model', options.modelPath,
-      '--port', String(LLAMA_SERVER_PORT),
+      '--port', String(this.serverPort),
       '--host', '127.0.0.1',
       '--ctx-size', String(options.contextSize),
       '--n-predict', String(options.maxTokens),
@@ -231,40 +250,50 @@ export class LlamaServerEngine {
 
   private async waitForServer(): Promise<void> {
     const deadline = Date.now() + HEALTH_TIMEOUT_MS;
-    this.log('debug', `[Load] Aguardando llama-server na porta ${LLAMA_SERVER_PORT}...`);
+    const process = this.serverProcess;
+    if (!process) throw new Error('Processo llama-server não foi iniciado.');
+    let startupError: Error | undefined;
+    const onStartupError = (error: Error): void => { startupError = error; };
+    process.once('error', onStartupError);
+    this.log('debug', `[Load] Aguardando llama-server na porta ${this.serverPort}...`);
 
-    while (Date.now() < deadline) {
-      try {
-        const ok = await this.checkHealth();
-        if (ok) {
-          this.serverReady = true;
-          this.log('debug', `[Load] llama-server respondeu /health.`);
-          return;
+    try {
+      while (Date.now() < deadline) {
+        if (startupError) throw startupError;
+        try {
+          const ok = await this.checkHealth();
+          if (ok) {
+            this.serverReady = true;
+            this.log('debug', `[Load] llama-server respondeu /health.`);
+            return;
+          }
+        } catch {
+          // ainda não está pronto
         }
-      } catch {
-        // ainda não está pronto
+
+        // Verifica se o processo morreu enquanto aguardávamos
+        if (process.exitCode !== null && process.exitCode !== undefined) {
+          throw new Error(
+            `llama-server encerrou antes de ficar pronto: code=${process.exitCode}`
+          );
+        }
+
+        await delay(HEALTH_POLL_MS);
       }
 
-      // Verifica se o processo morreu enquanto aguardávamos
-      if (this.serverProcess?.exitCode !== null && this.serverProcess?.exitCode !== undefined) {
-        throw new Error(
-          `llama-server encerrou antes de ficar pronto: code=${this.serverProcess.exitCode}`
-        );
-      }
-
-      await delay(HEALTH_POLL_MS);
+      throw new Error(
+        `Tempo esgotado aguardando llama-server (${HEALTH_TIMEOUT_MS / 1000}s). ` +
+        'Verifique se o binário é compatível com este sistema.'
+      );
+    } finally {
+      process.off('error', onStartupError);
     }
-
-    throw new Error(
-      `Tempo esgotado aguardando llama-server (${HEALTH_TIMEOUT_MS / 1000}s). ` +
-      'Verifique se o binário é compatível com este sistema.'
-    );
   }
 
   private checkHealth(): Promise<boolean> {
     return new Promise((resolve, reject) => {
       const req = http.get(
-        `http://127.0.0.1:${LLAMA_SERVER_PORT}/health`,
+        `http://127.0.0.1:${this.serverPort}/health`,
         { timeout: 2000 },
         (res) => {
           let body = '';
@@ -341,7 +370,8 @@ export class LlamaServerEngine {
       this.ensureLoaded();
       this.agentSystemPrompt = this.withPromptMode(systemPrompt, this.options?.promptMode);
       this.agentActive = true;
-      this.chatHistory = []; // histórico limpo para nova sessão do agente
+      this.chatHistory = []; // histórico de chat não é misturado ao agente
+      this.agentHistory = [];
       this.log('debug', [
         '[Agent][startAgent] Sessão do agente iniciada.',
         `systemPromptChars=${systemPrompt.length}`,
@@ -368,28 +398,56 @@ export class LlamaServerEngine {
         ? this.agentSystemPrompt
         : this.chatSystemPrompt;
 
-      // O AgentLoop já constrói cada prompt com todo o contexto necessário
-      // (resultado da ferramenta anterior via resultPrompt). Não acumulamos
-      // histórico entre steps para evitar estourar o contexto do modelo.
+      // Mantém os turns do agente também no motor HTTP. O motor embarcado já
+      // preserva esse histórico dentro da LlamaChatSession; sem esta lista, o
+      // llama-server perdia resultados de ferramentas e respostas inválidas nas
+      // etapas seguintes, produzindo comportamento diferente entre os motores.
+      this.agentHistory.push({ role: 'user', content: text });
       const messages: ChatMessage[] = [
         { role: 'system', content: activeSystemPrompt },
-        { role: 'user', content: text }
+        ...this.agentHistory
       ];
 
-      const maxTokens = Math.max(
-        32,
-        Math.min(
-          options.maxTokens ?? this.options!.maxTokens,
-          (this.options!.contextSize) - messages.reduce((acc, m) => acc + Math.ceil(m.content.length / 3), 0) - 64
-        )
+      const contextSize = Math.max(256, this.options!.contextSize);
+      const estimatedInputTokens = messages.reduce(
+        (total, message) => total + Math.ceil(message.content.length / 3) + 8,
+        16
       );
+      const safetyTokens = Math.max(48, Math.floor(contextSize * 0.04));
+      const availableOutputTokens = contextSize - estimatedInputTokens - safetyTokens;
+      const requestedMaxTokens = Math.max(
+        1,
+        Math.floor(options.maxTokens ?? this.options!.maxTokens)
+      );
+
+      if (availableOutputTokens < 32) {
+        this.agentHistory.pop();
+        throw Object.assign(
+          new Error(
+            [
+              'O histórico do Agente excede a janela de contexto do modelo.',
+              `contexto=${contextSize}`,
+              `entradaEstimada=${estimatedInputTokens}`,
+              `margem=${safetyTokens}`,
+              'Aumente offgrid.contextSize ou reduza o contexto enviado.'
+            ].join(' ')
+          ),
+          {
+            name: 'ContextWindowError',
+            details: { contextSize, estimatedInputTokens, safetyTokens, requestedMaxTokens }
+          }
+        );
+      }
+
+      const maxTokens = Math.max(32, Math.min(requestedMaxTokens, availableOutputTokens));
 
       this.log('debug', [
         '[Agent][Prompt] Enviando para llama-server.',
         `step=firstStep=${options.firstStep}`,
         `chars=${text.length}`,
+        `tokensEntradaEstimados=${estimatedInputTokens}`,
         `maxTokens=${maxTokens}`,
-        `historyTurns=${this.chatHistory.length}`,
+        `historyTurns=${this.agentHistory.length}`,
         `signal=${Boolean(options.signal)}`,
         `aborted=${options.signal?.aborted ?? false}`
       ].join(' '));
@@ -402,9 +460,12 @@ export class LlamaServerEngine {
           onChunk: options.onChunk
         });
 
+        this.agentHistory.push({ role: 'assistant', content: response });
         this.log('debug', `[Agent][Prompt] Concluído em ${Date.now() - started} ms; resposta=${response.length} chars.`);
         return response;
       } catch (error) {
+        // Remove a mensagem deste step; os turns anteriores continuam íntegros.
+        this.agentHistory.pop();
         const elapsed = Date.now() - started;
         if (options.signal?.aborted || (error as Error)?.name === 'AbortError') {
           this.log('info', `[Abort][4/4] Sinal recebido pelo LlamaServerEngine. tempo=${elapsed}ms`);
@@ -420,6 +481,7 @@ export class LlamaServerEngine {
     await this.enqueue(async () => {
       this.agentActive = false;
       this.agentSystemPrompt = '';
+      this.agentHistory = [];
       this.chatHistory = [];
       this.log('debug', '[Agent][finishAgent] Sessão do agente encerrada; histórico limpo.');
     });
@@ -428,6 +490,7 @@ export class LlamaServerEngine {
   async clearHistory(): Promise<void> {
     await this.enqueue(() => {
       this.chatHistory = [];
+      this.agentHistory = [];
       this.log('debug', '[Session] Histórico limpo.');
       return Promise.resolve();
     });
@@ -453,7 +516,7 @@ export class LlamaServerEngine {
     });
 
     const response = await fetch(
-      `http://127.0.0.1:${LLAMA_SERVER_PORT}/v1/chat/completions`,
+      `http://127.0.0.1:${this.serverPort}/v1/chat/completions`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -556,10 +619,13 @@ export class LlamaServerEngine {
 
     this.serverProcess = undefined;
     this.serverReady = false;
+    this.serverPort = 0;
+    this.effectiveBackend = 'cpu';
     this.options = undefined;
     this.chatSystemPrompt = '';
     this.agentSystemPrompt = '';
     this.agentActive = false;
+    this.agentHistory = [];
     this.chatHistory = [];
 
     const report: UnloadReport = {
@@ -573,6 +639,14 @@ export class LlamaServerEngine {
   }
 
   // ─── Utilitários ─────────────────────────────────────────────────────────
+
+  private captureEffectiveBackend(line: string): void {
+    if (this.options?.gpu === 'cpu' || this.options?.gpuLayers === 0) return;
+    const normalized = line.toLowerCase();
+    if (normalized.includes('cuda')) this.effectiveBackend = 'cuda';
+    else if (normalized.includes('vulkan')) this.effectiveBackend = 'vulkan';
+    else if (normalized.includes('metal')) this.effectiveBackend = 'metal';
+  }
 
   private withPromptMode(systemPrompt: string, promptMode: EngineLoadOptions['promptMode']): string {
     if (promptMode !== 'no-think') return systemPrompt;
@@ -588,6 +662,28 @@ export class LlamaServerEngine {
     this.generationQueue = task;
     return task;
   }
+}
+
+function requestedEffectiveBackend(options: EngineLoadOptions): EffectiveBackend {
+  if (options.gpu === 'cpu' || options.gpuLayers === 0) return 'cpu';
+  return options.gpu === 'auto' ? 'cpu' : options.gpu;
+}
+
+function findAvailablePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen({ host: '127.0.0.1', port: 0, exclusive: true }, () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      server.close(error => {
+        if (error) reject(error);
+        else if (!port) reject(new Error('Não foi possível reservar uma porta local para o llama-server.'));
+        else resolve(port);
+      });
+    });
+  });
 }
 
 function delay(ms: number): Promise<void> {

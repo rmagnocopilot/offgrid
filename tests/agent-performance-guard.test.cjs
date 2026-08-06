@@ -14,18 +14,19 @@ test('criacao de arquivo usa 512 tokens', async () => {
   assert.match(policy, /isFileCreationTask\(request\) \? 512 : 0/);
 });
 
-test('recuperacao e etapas posteriores usam limite curto', async () => {
+test('todas as etapas usam o orçamento completo calculado para a tarefa', async () => {
   const engine = await source('src/engine/EngineClient.ts');
-  assert.match(engine, /prompt\.includes\('<correcao_chamada_ferramenta>'\)/);
-  assert.match(engine, /Math\.min\(params\.maxTokens \?\? 192, 192\)/);
-  assert.match(engine, /Math\.min\(params\.maxTokens \?\? 256, 256\)/);
+  assert.match(engine, /const stepMaxTokens = params\.maxTokens/);
+  assert.doesNotMatch(engine, /Math\.min\(params\.maxTokens \?\? 256, 256\)/);
+  assert.doesNotMatch(engine, /Math\.min\(params\.maxTokens \?\? 192, 192\)/);
   assert.match(engine, /maxTokens: stepMaxTokens/);
 });
 
-test('escrita rejeitada nao provoca nova geracao', async () => {
+test('falha corrigível de escrita volta ao modelo e rejeição do usuário encerra', async () => {
   const loop = await source('src/agent/AgentLoop.ts');
-  assert.match(loop, /Escrita rejeitada; encerrando sem nova geracao do modelo/);
-  assert.match(loop, /REVIEW_WRITE_TOOLS\.has\(call\.name\)/);
+  assert.match(loop, /Escrita inválida; devolvendo o erro ao modelo/);
+  assert.match(loop, /isExplicitUserRejection/);
+  assert.match(loop, /Escrita rejeitada pelo usuário; encerrando sem nova geração/);
 });
 
 test('criacao limita ferramentas e etapas', async () => {
@@ -33,4 +34,27 @@ test('criacao limita ferramentas e etapas', async () => {
   assert.match(extension, /const fileCreationTools = new Set/);
   assert.match(extension, /Math\.min\(configuredAgentSteps, 4\)/);
   assert.match(extension, /maxSteps: effectiveAgentSteps/);
+});
+test('instalação do servidor não bloqueia fallback embarcado', async () => {
+  const client = await source('src/engine/EngineClient.ts');
+  const worker = await source('src/engine/EngineWorker.ts');
+  assert.match(client, /continuando para o fallback embarcado/);
+  assert.match(worker, /llama-server\.\*\(\?:não encontrado\|not found\|indisponível\)/);
+});
+
+test('motor HTTP preserva histórico do agente e recusa contexto esgotado', async () => {
+  const engine = await source('src/llm/LlamaServerEngine.ts');
+  assert.match(engine, /private agentHistory: ChatMessage\[\]/);
+  assert.match(engine, /\.\.\.this\.agentHistory/);
+  assert.match(engine, /this\.agentHistory\.push\(\{ role: 'assistant'/);
+  assert.match(engine, /availableOutputTokens < 32/);
+  assert.match(engine, /ContextWindowError/);
+});
+
+test('revisão em lote valida conflitos e reverte gravações parciais', async () => {
+  const tools = await source('src/tools/WorkspaceTools.ts');
+  assert.match(tools, /assertEntryUnchanged/);
+  assert.match(tools, /restoreEntry/);
+  assert.match(tools, /Falha adicional ao reverter alterações/);
+  assert.match(tools, /cancelledCreation: true/);
 });

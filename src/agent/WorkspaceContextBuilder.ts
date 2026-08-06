@@ -24,6 +24,7 @@ export interface AgentWorkspaceContext {
 export async function buildAgentWorkspaceContext(params: {
   workspaceRoot?: string;
   priority: string[];
+  request?: string;
   maxFiles?: number;
   maxCharsPerFile?: number;
   maxTotalChars?: number;
@@ -66,6 +67,13 @@ export async function buildAgentWorkspaceContext(params: {
 
   for (const [index, item] of params.priority.entries()) {
     enqueue(item, index === 0 ? 'arquivo citado ou ativo prioritário' : 'arquivo priorizado pelo contexto', 0);
+  }
+
+  // Pedidos Java frequentemente citam classes sem a extensão (por exemplo,
+  // "crie XTest para X"). Sem resolver esses nomes, o agente recebe apenas o
+  // arquivo ativo e pode inventar campos da classe-alvo.
+  for (const namedJavaFile of resolveNamedJavaReferences(root, params.request, params.priority)) {
+    enqueue(namedJavaFile, 'classe Java citada no pedido', 0);
   }
 
   while (queued.length && files.length < maxFiles && totalChars < maxTotalChars) {
@@ -121,6 +129,69 @@ export async function buildAgentWorkspaceContext(params: {
   return { files, text };
 }
 
+
+function resolveNamedJavaReferences(root: string, request: string | undefined, priority: string[]): string[] {
+  const names: string[] = [];
+  const seenNames = new Set<string>();
+  for (const match of String(request ?? '').matchAll(/\b([A-Z][A-Za-z0-9_$]{2,})\b/g)) {
+    const name = match[1];
+    if (!name || seenNames.has(name.toLowerCase())) continue;
+    // Evita palavras comuns em caixa alta e mantém o custo da busca limitado.
+    if (/^(?:JSON|HTTP|HTTPS|REST|CRUD|DTO|VO|API|SQL|XML|HTML|CSS|JUNIT)$/i.test(name)) continue;
+    seenNames.add(name.toLowerCase());
+    names.push(name);
+    if (names.length >= 12) break;
+  }
+  if (!names.length) return [];
+
+  const targets = new Map(names.map(name => [`${name.toLowerCase()}.java`, name]));
+  const matches = new Map<string, string[]>();
+  const ignored = new Set(['.git', 'node_modules', 'out', 'dist', 'build', 'coverage', '.vscode-test', 'target']);
+  const stack = [root];
+  let visited = 0;
+
+  while (stack.length && visited < 20_000) {
+    const directory = stack.pop();
+    if (!directory) break;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      visited += 1;
+      if (visited >= 20_000) break;
+      if (entry.isDirectory()) {
+        if (!ignored.has(entry.name)) stack.push(path.join(directory, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const typeName = targets.get(entry.name.toLowerCase());
+      if (!typeName) continue;
+      const relative = path.relative(root, path.join(directory, entry.name)).replace(/\\/g, '/');
+      const list = matches.get(typeName) ?? [];
+      list.push(relative);
+      matches.set(typeName, list);
+    }
+  }
+
+  const priorityModules = new Set(priority.map(modulePrefix).filter(Boolean));
+  const resolved: string[] = [];
+  for (const name of names) {
+    const candidates = matches.get(name) ?? [];
+    if (candidates.length === 1) {
+      resolved.push(candidates[0]!);
+      continue;
+    }
+    const sameModule = candidates.filter(candidate => priorityModules.has(modulePrefix(candidate)));
+    if (sameModule.length === 1) resolved.push(sameModule[0]!);
+    // Em caso de ambiguidade real, não escolhe silenciosamente o arquivo errado.
+  }
+  return resolved;
+}
+
+function modulePrefix(filePath: string): string {
+  const normalized = String(filePath ?? '').split('#')[0]?.replace(/\\/g, '/') ?? '';
+  const marker = normalized.toLowerCase().indexOf('/src/');
+  return marker >= 0 ? normalized.slice(0, marker).toLowerCase() : '';
+}
 
 function resolveContextReference(root: string, requested: string): string | undefined {
   try {

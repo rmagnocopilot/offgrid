@@ -181,6 +181,23 @@ jobs:
 
           rm -rf work/bins
 
+      - name: Persistir checksums dos binários no repositório
+        if: ${{ github.ref_type == 'branch' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- models/manifest.json; then
+            echo "Nenhum checksum foi alterado."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add models/manifest.json
+          git commit -m "chore(models): atualizar checksums do llama-server [skip ci]"
+          # O workflow pode levar horas; incorpora commits que chegaram à branch
+          # durante os downloads antes de publicar o checksum atualizado.
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
       - name: Baixar licenças oficiais e publicar manifesto
         shell: bash
