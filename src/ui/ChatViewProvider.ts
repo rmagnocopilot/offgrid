@@ -152,7 +152,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
           <select id="mode" aria-label="Modo">
             <option value="chat">Chat</option>
             <option value="plan">Planejar</option>
-            <option value="readOnly">Somente leitura</option>
             <option value="agent">Agente</option>
           </select>
           <button id="autonomy"

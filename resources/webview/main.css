@@ -526,9 +526,10 @@ input:focus-visible,
 }
 
 .composer-row select {
-  min-width: 82px;
-  max-width: 145px;
-  flex: 1 1 92px
+  width: 96px;
+  min-width: 96px;
+  max-width: 96px;
+  flex: 0 0 96px
 }
 
 .composer-row .spacer {

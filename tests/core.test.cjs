@@ -11,6 +11,7 @@ const { execFileSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const { extractExplicitFileReferences, buildContextPriority } = require('../out/agent/AgentContext');
 const { buildAgentWorkspaceContext } = require('../out/agent/WorkspaceContextBuilder');
+const { javaUnitTestCreationTarget } = require('../out/agent/AgentTaskPolicy');
 const { detectToolCall, detectToolCalls, looksLikeToolCall, looksLikeToolSchema } = require('../out/agent/ToolCallParser');
 const { AgentLoop } = require('../out/agent/AgentLoop');
 const { normalizeRelativePath, isWriteProtectedPath, resolveInsideRoot } = require('../out/safety/PathSafety');
@@ -34,6 +35,20 @@ test('extrai arquivos explicitamente citados', () => {
 });
 test('expande abreviação html / ts', () => {
   assert.deepEqual(extractExplicitFileReferences('agenteFinanceiro.component.html / ts'), ['agenteFinanceiro.component.html','agenteFinanceiro.component.ts']);
+});
+test('não confunde pacote Java com arquivo .go', () => {
+  assert.deepEqual(
+    extractExplicitFileReferences('O teste deve ficar na pasta (br.gov.caixa.siavo.tests.dto).'),
+    []
+  );
+});
+
+test('deriva destino de teste Java pelo pacote informado e arquivo ativo', () => {
+  const target = javaUnitTestCreationTarget(
+    'crie os testes unitários dessa classe na pasta (br.gov.caixa.siavo.tests.dto)',
+    ['siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java']
+  );
+  assert.equal(target, 'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/TarifaSiapfDTOTest.java');
 });
 test('arquivo citado vence seleção e arquivo fixado', () => {
   const values = buildContextPriority({ prompt: 'altere src/a.ts', selectionFile: 'src/selection.ts', pinnedFile: 'src/pinned.ts', relatedFiles: ['src/related.ts'] });
@@ -249,6 +264,18 @@ test('VRAM disponível gera camadas progressivas', () => {
   const attempts = chooseLoadAttempts(loadOptions, resources([{ name:'GPU', totalBytes:4*1024**3, usedBytes:2*1024**3, freeBytes:2*1024**3, dedicated:true, source:'nvidia-smi' }]));
   assert.equal(attempts[0].gpu, 'vulkan'); assert.ok(attempts.some(x => x.gpuLayers === 1)); assert.equal(attempts.at(-1).gpu, 'cpu');
 });
+test('Qwen3 4B em 8192 tenta mais GPU e mantém fallback conservador', () => {
+  const free = 3.8 * 1024 ** 3;
+  const attempts = chooseLoadAttempts(
+    { ...loadOptions, modelPath: 'qwen3-4b-q4_k_m.gguf', contextSize: 8192 },
+    resources([{ name:'GPU', totalBytes:4*1024**3, usedBytes:0.2*1024**3, freeBytes:free, dedicated:true, source:'nvidia-smi' }])
+  );
+  const vulkanLayers = attempts.filter(item => item.gpu === 'vulkan').map(item => item.gpuLayers);
+  assert.ok(vulkanLayers[0] > Math.floor(3.8 * 8));
+  assert.ok(vulkanLayers.includes(Math.floor(3.8 * 8)));
+  assert.equal(attempts.at(-1).gpu, 'cpu');
+});
+
 test('perfil funcional persiste por máquina e modelo', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-profile-'));
   const store = new HardwareProfileStore(dir); await store.init(); await store.recordSuccess('C:/models/a.gguf', 4096, { gpu:'cpu', gpuLayers:0, reason:'ok' });
@@ -593,8 +620,14 @@ test('package aponta para JavaScript compilado e mantém fontes TypeScript', () 
 test('Activity Bar e abertura por F5 estão configuradas', () => {
   const pkg = require('../package.json'); assert.equal(pkg.contributes.viewsContainers.activitybar[0].id,'offgrid'); const launch = JSON.parse(fs.readFileSync(path.join(root,'.vscode/launch.json'),'utf8')); assert.equal(launch.configurations[0].type,'extensionHost');
 });
-test('interface possui breakpoints responsivos e modos completos', () => {
-  const css = fs.readFileSync(path.join(root,'resources/webview/main.css'),'utf8'); const ui = fs.readFileSync(path.join(root,'src/ui/ChatViewProvider.ts'),'utf8'); assert.match(css,/@media\(max-width:520px\)/); assert.match(css,/@media\(max-width:330px\)/); for (const mode of ['Chat','Planejar','Somente leitura','Agente']) assert.match(ui,new RegExp(mode));
+test('interface possui breakpoints responsivos e modos principais', () => {
+  const css = fs.readFileSync(path.join(root,'resources/webview/main.css'),'utf8');
+  const ui = fs.readFileSync(path.join(root,'src/ui/ChatViewProvider.ts'),'utf8');
+  assert.match(css,/@media\(max-width:520px\)/);
+  assert.match(css,/@media\(max-width:330px\)/);
+  for (const mode of ['Chat','Planejar','Agente']) assert.match(ui,new RegExp(mode));
+  assert.doesNotMatch(ui,/Somente leitura/);
+  assert.match(css,/\.composer-row select \{[\s\S]*?width: 96px;[\s\S]*?flex: 0 0 96px/);
 });
 test('manifesto não contém caracteres de acentuação substituídos por interrogação', () => {
   const manifest = fs.readFileSync(path.join(root, 'models', 'manifest.json'), 'utf8');
@@ -639,6 +672,37 @@ test('contexto resolve classes Java citadas sem extensão no mesmo módulo', asy
   const paths = context.files.map(file => file.filePath);
   assert.ok(paths.includes('siavo-ejb/src/main/java/br/gov/caixa/dto/TarifaSiapfDTO.java'));
   assert.equal(paths.includes('outro-modulo/src/main/java/br/gov/caixa/dto/TarifaSiapfDTO.java'), false);
+});
+
+test('contexto encontra teste-exemplo Java citado no pacote de destino', async t => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-java-example-context-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const files = {
+    'siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java': 'package br.gov.caixa.siavo.dto; public class TarifaSiapfDTO {}',
+    'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/AcompanhamentoObrasHistoricoDTOTest.java': 'package br.gov.caixa.siavo.tests.dto; public class AcompanhamentoObrasHistoricoDTOTest {}'
+  };
+  for (const [relative, content] of Object.entries(files)) {
+    const absolute = path.join(dir, relative);
+    await fsp.mkdir(path.dirname(absolute), { recursive: true });
+    await fsp.writeFile(absolute, content, 'utf8');
+  }
+
+  const context = await buildAgentWorkspaceContext({
+    workspaceRoot: dir,
+    priority: ['siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java'],
+    request: 'crie os testes unitarios dessa classe na pasta (br.gov.caixa.siavo.tests.dto). Pode usar AcompanhamentoObrasHistoricoDTOTest como exemplo',
+    maxFiles: 3,
+    maxCharsPerFile: 3_000,
+    maxTotalChars: 9_000,
+    includeTestRelated: true
+  });
+
+  const paths = context.files.map(file => file.filePath);
+  assert.deepEqual(paths.slice(0, 2), [
+    'siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java',
+    'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/AcompanhamentoObrasHistoricoDTOTest.java'
+  ]);
 });
 
 test('contexto de teste Java não carrega spec TypeScript de outro módulo', async t => {

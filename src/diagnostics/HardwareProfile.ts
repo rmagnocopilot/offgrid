@@ -25,8 +25,17 @@ export function chooseLoadAttempts(options: EngineLoadOptions, resources: Resour
     const freeGb = bestGpu.freeBytes / 1024 ** 3;
     if (options.gpuLayers !== 'auto') attempts.push({ gpu: 'vulkan', gpuLayers: options.gpuLayers, reason: 'Camadas configuradas pelo usuário' });
     else {
-      const initial = Math.max(1, Math.min(40, Math.floor(freeGb * 8)));
-      for (const layers of [initial, Math.floor(initial * 0.66), Math.floor(initial * 0.33), 1]) {
+      const baseline = Math.max(1, Math.min(40, Math.floor(freeGb * 8)));
+      const qwen4bAt8k = /qwen3[-_]?4b/i.test(path.basename(options.modelPath))
+        && options.contextSize <= 8_192;
+      // Em 8192 o Qwen3 4B usa bem menos KV cache que em 12288. Tentar
+      // algumas camadas extras reduz a travessia CPU↔GPU por token sem tornar
+      // a carga arriscada: se a tentativa não couber, o plano cai imediatamente
+      // para o baseline conservador já usado nas versões anteriores.
+      const initial = qwen4bAt8k
+        ? Math.max(baseline, Math.min(37, Math.floor(freeGb * 9)))
+        : baseline;
+      for (const layers of [initial, baseline, Math.floor(initial * 0.66), Math.floor(initial * 0.33), 1]) {
         if (layers > 0) attempts.push({ gpu: 'vulkan', gpuLayers: layers, reason: `Perfil adaptativo (${freeGb.toFixed(1)} GB livres)` });
       }
     }

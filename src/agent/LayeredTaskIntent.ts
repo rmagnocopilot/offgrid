@@ -70,6 +70,9 @@ const STOP_ENTITY = new Set([
 export function interpretLayeredTask(request: string): LayeredTaskIntent {
   const text = request.trim();
   const normalized = fold(text);
+
+  const testIntent = interpretExplicitTestCreation(text, normalized);
+  if (testIntent) return testIntent;
   const layers = findLayerMentions(normalized);
   const actions = findActionMentions(normalized);
   const explicitFiles = extractExplicitFiles(text);
@@ -128,6 +131,55 @@ export function interpretLayeredTask(request: string): LayeredTaskIntent {
 export function taskTargetsLayer(request: string, layer: TaskLayer): boolean {
   const intent = interpretLayeredTask(request);
   return !intent.ambiguous && intent.targetLayer === layer;
+}
+
+function interpretExplicitTestCreation(text: string, normalized: string): LayeredTaskIntent | undefined {
+  const asksToCreate = /\b(?:crie|criar|gere|gerar|adicione|adicionar|escreva|escrever|create|generate|write)\b/i.test(normalized);
+  const asksForTests = /\b(?:testes?|tests?|specs?)\b/i.test(normalized);
+  const strongTestArtifact = /\b(?:testes?\s+unit[aá]rios?|unit\s+tests?|arquivo\s+de\s+testes?)\b/i.test(text)
+    || /\b[A-Z][A-Za-z0-9_$]*Test\b/.test(text)
+    || /\.(?:spec|test)\.[jt]s\b/i.test(text);
+  if (!asksToCreate || !asksForTests || !strongTestArtifact) return undefined;
+
+  const explicitFiles = extractExplicitFiles(text);
+  const javaEvidence = inferLanguage(normalized, explicitFiles) === 'java'
+    || /\b[A-Z][A-Za-z0-9_$]*(?:DTO|Dto|Entity|Model|VO|Service|Controller|Resource)?Test\b/.test(text)
+    || /\b(?:[a-z_$][\w$]*\.){2,}[a-z_$][\w$]*\b/i.test(text);
+  const typescriptEvidence = inferLanguage(normalized, explicitFiles) === 'typescript'
+    || /\.component(?:\.spec)?\.ts\b/i.test(text);
+  const language: TaskLanguage = javaEvidence && !typescriptEvidence
+    ? 'java'
+    : typescriptEvidence && !javaEvidence
+      ? 'typescript'
+      : inferLanguage(normalized, explicitFiles);
+
+  const mentions = findLayerMentions(normalized);
+  const references = uniqueLayers(
+    mentions
+      .filter(mention => mention.layer !== 'test' || isReferenceMention(normalized, mention))
+      .map(mention => mention.layer)
+  );
+  if (/\b(?:exemplo|example|padrao|padrão|seguindo|basead[oa]|use|usar)\b/i.test(text)
+    && /\b[A-Z][A-Za-z0-9_$]*Test\b/.test(text)
+    && !references.includes('test')) {
+    references.push('test');
+  }
+  if (/\b(?:DTO|Dto|Entity|Model|VO)\b/.test(text) && !references.includes('model')) {
+    references.push('model');
+  }
+
+  return {
+    action: 'create',
+    targetLayer: 'test',
+    targetLayers: ['test'],
+    referenceLayers: references,
+    operation: 'test',
+    entityTerms: extractEntityTerms(text, explicitFiles),
+    language,
+    explicitFiles,
+    confidence: language === 'unknown' ? 'medium' : 'high',
+    ambiguous: false
+  };
 }
 
 function findLayerMentions(text: string): LayerMention[] {
@@ -265,8 +317,13 @@ function inferOperation(text: string): TaskOperation {
 }
 
 function inferLanguage(text: string, files: string[]): TaskLanguage {
-  if (files.some(file => /\.java$/i.test(file)) || /\b(?:java|jakarta|jax-?rs|spring)\b/i.test(text)) return 'java';
   if (files.some(file => /\.(?:ts|tsx)$/i.test(file)) || /\b(?:typescript|angular|nestjs?|node\.js)\b/i.test(text)) return 'typescript';
+  const dottedJavaPackage = /\b(?:[a-z_$][\w$]*\.){2,}[a-z_$][\w$]*\b/i.test(text)
+    && !/\.(?:ts|tsx|js|jsx|json|xml|yml|yaml)\b/i.test(text);
+  if (files.some(file => /\.java$/i.test(file))
+    || /\b(?:java|jakarta|jax-?rs|spring|junit|mockito)\b/i.test(text)
+    || dottedJavaPackage
+    || /\b[A-Z][A-Za-z0-9_$]*(?:DTO|Dto|Entity|Model|VO)Test\b/.test(text)) return 'java';
   return 'unknown';
 }
 

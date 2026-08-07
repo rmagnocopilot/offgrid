@@ -105,12 +105,19 @@ export class LlamaEngine {
       await this.disposeResources('nova carga', false);
       const runtime = await importNodeLlamaCppRuntime();
       const requested = options.gpu;
-      // logLevel debug + logger customizado: expõe os logs internos do llama.cpp
-      // (decode, batch, kv cache) para diagnosticar travamentos na geração.
+      // Em produção, o runtime nativo fica em warn para evitar milhares de linhas
+      // de metadata/tensores. Debug/trace do Offgrid continua disponível para
+      // o fluxo TypeScript sem poluir a Saída padrão.
       const llamaOptions: Record<string, unknown> = {
-        logLevel: runtime.LlamaLogLevel?.debug ?? runtime.LlamaLogLevel?.warn,
+        logLevel: runtime.LlamaLogLevel?.warn,
         logger: (level: unknown, message: string) => {
-          this.log('debug', `[llama.cpp][${String(level)}] ${message}`);
+          const nativeLevel = String(level).toLowerCase();
+          if (/control token.*not marked as EOG|control-looking token.*not control-type/i.test(message)) {
+            this.log('trace', `[llama.cpp][${String(level)}] ${message}`);
+            return;
+          }
+          const appLevel: 'warn' | 'error' = /error|fatal/.test(nativeLevel) ? 'error' : 'warn';
+          this.log(appLevel, `[llama.cpp][${String(level)}] ${message}`);
         }
       };
       if (requested !== 'auto') llamaOptions.gpu = requested === 'cpu' ? false : requested;
@@ -197,9 +204,9 @@ export class LlamaEngine {
           const kvNow = this.sequence?.nextTokenIndex ?? -1;
           const delta = kvNow - chatLastKv;
           chatLastKv = kvNow;
-          this.log('debug', `[Chat][Heartbeat] elapsed=${Date.now() - started} ms kvTokens=${kvNow} delta5s=${delta} tokensGerados=${chatTokenCount}`);
+          this.log('trace', `[Chat][Heartbeat] elapsed=${Date.now() - started} ms kvTokens=${kvNow} delta30s=${delta} tokensGerados=${chatTokenCount}`);
         } catch { /* ignorar */ }
-      }, 5_000);
+      }, 30_000);
       try {
         const response = await this.session.prompt(text, {
           maxTokens,
@@ -394,10 +401,12 @@ export class LlamaEngine {
         this.log('debug', `[Agent][DIAG] Sessão de diagnóstico criada. wrapper=${(this.session as any)?.chatWrapper?.wrapperName ?? 'n/a'}`);
       }
 
-      this.log(
-        'debug',
-        `[Agent][Prompt] Primeiros 500 chars do prompt enviado (diag=${isDiag}): ${effectivePrompt.slice(0, 500)}`
-      );
+      if (isDiag) {
+        this.log(
+          'trace',
+          `[Agent][DIAG] Primeiros 500 chars do prompt: ${effectivePrompt.slice(0, 500)}`
+        );
+      }
 
       const temperature = Math.min(this.options!.temperature, 0.2);
       this.log(
@@ -428,19 +437,19 @@ export class LlamaEngine {
           const kvNow = this.sequence?.nextTokenIndex ?? -1;
           const delta = kvNow - lastHeartbeatKv;
           lastHeartbeatKv = kvNow;
-          this.log('debug', [
+          this.log('trace', [
             '[Agent][Heartbeat]',
             `elapsed=${Date.now() - started} ms`,
             `kvTokens=${kvNow}`,
-            `delta5s=${delta}`,
+            `delta30s=${delta}`,
             `tokensGerados=${tokenCount}`,
             `sessionDisposed=${this.session?.disposed ?? 'n/a'}`,
             `sequenceDisposed=${this.sequence?.disposed ?? 'n/a'}`
           ].join(' '));
         } catch (hbError) {
-          this.log('debug', `[Agent][Heartbeat] erro ao ler estado: ${hbError instanceof Error ? hbError.message : String(hbError)}`);
+          this.log('trace', `[Agent][Heartbeat] erro ao ler estado: ${hbError instanceof Error ? hbError.message : String(hbError)}`);
         }
-      }, 5_000);
+      }, 30_000);
 
       try {
         const response = await this.session.prompt(effectivePrompt, {
@@ -452,8 +461,8 @@ export class LlamaEngine {
             if (firstTokenAt === null) {
               firstTokenAt = Date.now();
               this.log('debug', `[Agent][Prompt] Primeiro token gerado em ${firstTokenAt - started} ms. tokens=${tokens.length}`);
-            } else if (tokenCount % 10 === 0) {
-              this.log('debug', `[Agent][Prompt] Gerando... tokens=${tokenCount} elapsed=${Date.now() - started} ms`);
+            } else if (tokenCount % 100 === 0) {
+              this.log('trace', `[Agent][Prompt] Gerando... tokens=${tokenCount} elapsed=${Date.now() - started} ms`);
             }
           },
           onTextChunk: (chunk: string) => options.onChunk?.(chunk)
@@ -473,8 +482,8 @@ export class LlamaEngine {
         const elapsed = Date.now() - started;
         if (options.signal?.aborted || (error as Error)?.name === 'AbortError') {
           this.log(
-            'info',
-            `[Abort][4/4] Sinal recebido pelo LlamaEngine. aborted=${options.signal?.aborted ?? false} tempo=${elapsed}ms`
+            'trace',
+            `[Abort] Sinal recebido pelo LlamaEngine. aborted=${options.signal?.aborted ?? false} tempo=${elapsed}ms`
           );
         } else {
           this.log(

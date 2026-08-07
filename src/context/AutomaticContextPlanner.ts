@@ -70,7 +70,16 @@ export function estimateTaskComplexity(params: {
     'backend e frontend', 'model e service', 'dto e service'
   ].some(fragment => normalized.includes(fragment));
 
-  if (params.multiLayer || multiByText || estimatedFiles >= 2) {
+  // Criar um único artefato costuma precisar ler 2–3 arquivos de referência,
+  // mas isso não transforma a tarefa em multi-arquivo. Classificar pelas entradas
+  // inflava o contexto (ex.: DTO + teste-exemplo => 12288 no Qwen3 4B) sem
+  // benefício para a geração e com forte penalidade no Vulkan.
+  const smallCreation = Boolean(params.createsFiles)
+    && !params.multiLayer
+    && !multiByText
+    && estimatedFiles <= 3;
+
+  if (!smallCreation && (params.multiLayer || multiByText || estimatedFiles >= 2)) {
     return {
       complexity: 'multiFile',
       estimatedFiles,
@@ -78,7 +87,11 @@ export function estimateTaskComplexity(params: {
     };
   }
 
-  return { complexity: 'simple', estimatedFiles, reason: 'tarefa simples' };
+  return {
+    complexity: 'simple',
+    estimatedFiles,
+    reason: smallCreation ? 'criação de um único artefato com referências' : 'tarefa simples'
+  };
 }
 
 export function planContext(input: ContextPlanInput): ContextPlan {

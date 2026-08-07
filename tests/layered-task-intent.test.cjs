@@ -67,6 +67,22 @@ test('interpretação é genérica para repository, component, model e test', ()
   }
 });
 
+test('pedido corporativo de teste DTO é alvo Java de teste e não ambíguo', () => {
+  const request = [
+    'crie os testes unitarios dessa classe seguindo o padrao da aplicação existente.',
+    'O teste deve ficar na pasta (br.gov.caixa.siavo.tests.dto).',
+    'Pode usar AcompanhamentoObrasHistoricoDTOTest como exemplo'
+  ].join(' ');
+  const intent = interpretLayeredTask(request);
+  assert.equal(intent.targetLayer, 'test');
+  assert.deepEqual(intent.targetLayers, ['test']);
+  assert.equal(intent.operation, 'test');
+  assert.equal(intent.language, 'java');
+  assert.equal(intent.ambiguous, false);
+  assert.equal(intent.confidence, 'high');
+  assert.ok(intent.referenceLayers.includes('test'));
+});
+
 test('implementação do interpretador não contém nomes do projeto funcional', async () => {
   const implementation = await fsp.readFile(path.join(__dirname, '..', 'src', 'agent', 'LayeredTaskIntent.ts'), 'utf8');
   assert.doesNotMatch(implementation, /ClienteResource|ClienteService|locadora|cliente-vip/i);

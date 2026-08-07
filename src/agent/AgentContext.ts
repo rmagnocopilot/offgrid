@@ -4,7 +4,7 @@ const EXTENSIONS = [
   'js','cjs','mjs','jsx','ts','tsx','json','jsonc','css','scss','html','md','py','java','kt','kts',
   'gradle','properties','cs','go','rs','php','vue','svelte','yml','yaml','xml','jsp','sql','sh','ps1'
 ].join('|');
-const FILE_PATTERN = new RegExp(`(?:[A-Za-z]:)?[\\w@./\\\\-]+\\.(?:${EXTENSIONS})`, 'gi');
+const FILE_PATTERN = new RegExp(`(?:[A-Za-z]:)?[\\w@./\\\\-]+\\.(?:${EXTENSIONS})(?![A-Za-z0-9_])`, 'gi');
 const SHORTHAND_PATTERN = new RegExp(`^\\s*\\/\\s*(${EXTENSIONS})\\b`, 'i');
 
 export function extractExplicitFileReferences(text: string): string[] {

@@ -61,21 +61,15 @@ try {
 
 send({ type: 'ready', pid: process.pid });
 
-// Heartbeat do event loop do worker: se estas mensagens pararem de aparecer
-// durante um travamento, o event loop do processo isolado está bloqueado
-// (deadlock nativo); se continuarem, o travamento está só na promise da geração.
-let workerHeartbeatCount = 0;
+// Heartbeat reservado ao nível trace. É útil para diagnosticar deadlock, mas
+// não deve aparecer na saída normal do usuário.
 setInterval(() => {
-  workerHeartbeatCount += 1;
-  // Loga a cada 15s (3 ciclos de 5s) para não poluir
-  if (workerHeartbeatCount % 3 === 0) {
-    const memory = process.memoryUsage();
-    send({
-      type: 'log', level: 'debug', category: 'model',
-      message: `[Worker][EventLoop] vivo. rss=${Math.round(memory.rss / 1024 / 1024)} MB heap=${Math.round(memory.heapUsed / 1024 / 1024)} MB`
-    });
-  }
-}, 5_000).unref();
+  const memory = process.memoryUsage();
+  send({
+    type: 'log', level: 'trace', category: 'model',
+    message: `[Worker][EventLoop] vivo. rss=${Math.round(memory.rss / 1024 / 1024)} MB heap=${Math.round(memory.heapUsed / 1024 / 1024)} MB`
+  });
+}, 60_000).unref();
 
 process.on('message', async (message: unknown) => {
   if (!message || typeof message !== 'object') return;
@@ -85,10 +79,10 @@ process.on('message', async (message: unknown) => {
 
     send({
       type: 'log',
-      level: 'info',
+      level: 'trace',
       category: 'model',
       message: [
-        '[Abort][3/4] Cancel recebido pelo EngineWorker.',
+        '[Abort] Cancel recebido pelo EngineWorker.',
         `requestId=${value.requestId}`,
         `controller=${Boolean(controller)}`
       ].join(' ')
@@ -99,10 +93,10 @@ process.on('message', async (message: unknown) => {
 
       send({
         type: 'log',
-        level: 'info',
+        level: 'trace',
         category: 'model',
         message: [
-          '[Abort][3/4] AbortController do worker sinalizado.',
+          '[Abort] AbortController do worker sinalizado.',
           `requestId=${value.requestId}`,
           `aborted=${controller.signal.aborted}`
         ].join(' ')
@@ -115,14 +109,14 @@ process.on('message', async (message: unknown) => {
   const request = value as unknown as EngineRequest;
   const controller = new AbortController();
   controllers.set(request.requestId, controller);
-  send({ type: 'log', level: 'debug', category: 'model', message: `[Worker][RPC] Recebido: ${request.method} requestId=${request.requestId}` });
+  send({ type: 'log', level: 'trace', category: 'model', message: `[Worker][RPC] Recebido: ${request.method} requestId=${request.requestId}` });
   const handleStartedAt = Date.now();
   try {
     const result = await handle(request, controller.signal);
-    send({ type: 'log', level: 'debug', category: 'model', message: `[Worker][RPC] Concluído: ${request.method} requestId=${request.requestId} em ${Date.now() - handleStartedAt} ms` });
+    send({ type: 'log', level: 'trace', category: 'model', message: `[Worker][RPC] Concluído: ${request.method} requestId=${request.requestId} em ${Date.now() - handleStartedAt} ms` });
     send({ type: 'result', requestId: request.requestId, result });
   } catch (error) {
-    send({ type: 'log', level: 'debug', category: 'model', message: `[Worker][RPC] Falhou: ${request.method} requestId=${request.requestId} em ${Date.now() - handleStartedAt} ms: ${error instanceof Error ? error.message : String(error)}` });
+    send({ type: 'log', level: 'trace', category: 'model', message: `[Worker][RPC] Falhou: ${request.method} requestId=${request.requestId} em ${Date.now() - handleStartedAt} ms: ${error instanceof Error ? error.message : String(error)}` });
     send({
       type: 'error', requestId: request.requestId,
       error: {

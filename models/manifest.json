@@ -32,7 +32,7 @@
       "displayName": "Qwen 4B",
       "fileName": "qwen3-4b-q4_k_m.gguf",
       "description": "Modelo intermediário recomendado para Chat e Agente, com maior capacidade de raciocínio e geração de código.",
-      "hardware": "CPU; recomendado 12 GB de RAM ou mais; contexto automático entre 4096 e 12288",
+      "hardware": "CPU; recomendado 12 GB de RAM ou mais; contexto 8192 por padrão e 12288 apenas em tarefas realmente complexas",
       "approxSize": "~2,5 GB",
       "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
       "parts": [
@@ -45,7 +45,7 @@
       "contextProfile": {
         "minimum": 4096,
         "base": 8192,
-        "complex": 12288,
+        "complex": 8192,
         "maximum": 12288
       },
       "promptMode": "no-think"

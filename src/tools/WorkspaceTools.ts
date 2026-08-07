@@ -16,6 +16,29 @@ const DEFAULT_GLOB = '**/*.{js,cjs,mjs,jsx,ts,tsx,json,jsonc,css,scss,html,md,py
 
 interface StagedEntry { content: string; original: string; existed: boolean; delete: boolean }
 
+function summarizeToolArguments(argumentsValue: Record<string, unknown>): string {
+  const compact: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(argumentsValue)) {
+    if (typeof value === 'string') {
+      const contentLike = /content|text|source|replacement|patch|diff/i.test(key);
+      compact[key] = contentLike || value.length > 180
+        ? `<${value.length} chars>`
+        : value;
+      continue;
+    }
+    if (Array.isArray(value)) {
+      compact[key] = `<array:${value.length}>`;
+      continue;
+    }
+    if (value && typeof value === 'object') {
+      compact[key] = '<object>';
+      continue;
+    }
+    compact[key] = value;
+  }
+  return JSON.stringify(compact);
+}
+
 export class WorkspaceTools {
   private readonly staged = new Map<string, StagedEntry>();
   private reviewSummary = '';
@@ -47,7 +70,7 @@ export class WorkspaceTools {
 
   async execute(call: ToolCall): Promise<ToolResult> {
     const started = Date.now();
-    this.logger.info('agent', `[Tool] ${call.name} ${JSON.stringify(call.arguments)}`);
+    this.logger.info('agent', `[Tool] ${call.name} ${summarizeToolArguments(call.arguments)}`);
     try {
       const content = await this.dispatch(call.name, call.arguments);
       const result: ToolResult = { callId: call.id, name: call.name, ok: true, content, durationMs: Date.now() - started };

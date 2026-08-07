@@ -43,6 +43,7 @@ import {
   agentOutputTokenFloor,
   generatedFileContentIssue,
   isFileCreationTask,
+  javaUnitTestCreationTarget,
   workspaceRootCreationTarget
 } from './agent/AgentTaskPolicy';
 import { schemasForMode, validateToolArguments } from './tools/ToolRegistry';
@@ -85,7 +86,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const logsPath = path.join(context.globalStorageUri.fsPath, 'logs');
   const logger = new FileLogger({
     directory: logsPath,
-    level: config.get<LogLevel>('logLevel', 'debug'),
+    level: config.get<LogLevel>('logLevel', 'info'),
     output: line => output.appendLine(line)
   });
   logger.info('offgrid', `Offgrid ${context.extension.packageJSON.version} ativado. Plataforma=${process.platform}; TypeScript=sim; motor isolado=sim.`);
@@ -403,13 +404,16 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         genericFileCreationTask
       );
       const contextPriority = rootCreationTarget ? [] : priority;
+      const javaTestCreationTarget = javaUnitTestCreationTarget(text, contextPriority);
       const fileCreationTools = new Set([
-        'get_active_file',
         'list_files',
         'read_file',
         'create_file',
         'apply_changes'
       ]);
+      // Se já existe arquivo prioritário no contexto, get_active_file só faz o
+      // modelo gastar uma etapa para descobrir algo que o prompt já informa.
+      if (!contextPriority.length) fileCreationTools.add('get_active_file');
       const backendEndpointTools = new Set([
         'list_files',
         'list_directory_tree',
@@ -758,7 +762,15 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
             'Não escolha subpasta e não use o arquivo ativo como destino ou contexto.',
             '</destino_criacao_obrigatorio>'
           ].join('\n')
-        : '';
+        : javaTestCreationTarget
+          ? [
+              '<destino_criacao_obrigatorio>',
+              `O teste Java deve ser criado exatamente em "${javaTestCreationTarget}".`,
+              'O arquivo Java de origem já está no contexto. Use o teste-exemplo citado como padrão quando ele estiver disponível no contexto.',
+              'Não chame get_active_file para redescobrir o arquivo de origem.',
+              '</destino_criacao_obrigatorio>'
+            ].join('\n')
+          : '';
       const taskEnvelope = [
         creationTargetEnvelope,
         `<tarefa_usuario>\n${text}\n</tarefa_usuario>`
@@ -831,18 +843,16 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         s.logger.debug('agent', `[Context] Arquivos carregados automaticamente: ${workspaceContext.files.map(file => file.filePath).join(', ')}`);
       }
       const agentStartedAt = Date.now();
-        s.logger.info(
-          'agent',
-          `[Flow][5/6] Iniciando AgentLoop; máximoEtapas=${vscode.workspace
-            .getConfiguration('offgrid')
-            .get<number>('maxAgentSteps', 10)}.`
-        );
       const configuredAgentSteps = vscode.workspace
         .getConfiguration('offgrid')
         .get<number>('maxAgentSteps', 10);
       const effectiveAgentSteps = genericFileCreationTask
         ? Math.min(configuredAgentSteps, 4)
         : configuredAgentSteps;
+      s.logger.info(
+        'agent',
+        `[Flow][5/6] Iniciando AgentLoop; máximoEtapas=${effectiveAgentSteps}.`
+      );
 
       response = await s.engine.runAgent({
         initialPrompt,
@@ -870,12 +880,17 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
               ? call.arguments.filePath.replace(/\\/g, '/')
               : '';
             if (proposedPath !== rootCreationTarget) {
-              s.logger.info(
-                'agent',
-                `[Tool] Destino de create_file normalizado para a raiz: ${rootCreationTarget}.`
-              );
+              s.logger.info('agent', `[Tool] Destino de create_file normalizado para a raiz: ${rootCreationTarget}.`);
             }
             call.arguments.filePath = rootCreationTarget;
+          } else if (call.name === 'create_file' && javaTestCreationTarget) {
+            const proposedPath = typeof call.arguments.filePath === 'string'
+              ? call.arguments.filePath.replace(/\\/g, '/')
+              : '';
+            if (proposedPath !== javaTestCreationTarget) {
+              s.logger.info('agent', `[Tool] Destino do teste Java normalizado: ${javaTestCreationTarget}.`);
+            }
+            call.arguments.filePath = javaTestCreationTarget;
           }
           if (call.name === 'create_file') {
             const contentIssue = generatedFileContentIssue(
@@ -1437,7 +1452,7 @@ function startMonitoring(s: Services): void {
 }
 
 async function onConfigurationChanged(s: Services, event: vscode.ConfigurationChangeEvent): Promise<void> {
-  if (event.affectsConfiguration('offgrid.logLevel')) s.logger.setLevel(vscode.workspace.getConfiguration('offgrid').get<LogLevel>('logLevel', 'debug'));
+  if (event.affectsConfiguration('offgrid.logLevel')) s.logger.setLevel(vscode.workspace.getConfiguration('offgrid').get<LogLevel>('logLevel', 'info'));
   if (event.affectsConfiguration('offgrid.diagnosticsPanel')) s.diagnosticsPanel = vscode.workspace.getConfiguration('offgrid').get<DiagnosticsPanelMode>('diagnosticsPanel', 'compact');
   if (event.affectsConfiguration('offgrid.agentAutonomy')) s.autonomy = vscode.workspace.getConfiguration('offgrid').get<AgentAutonomy>('agentAutonomy', 'assisted');
   await refreshUi(s);

@@ -66,6 +66,42 @@ export function workspaceRootCreationTarget(
   return candidate;
 }
 
+/**
+ * Para pedidos explícitos de teste Java que informam o pacote de destino,
+ * deriva o caminho do teste a partir do arquivo Java prioritário. Isso evita
+ * que modelos pequenos gastem uma etapa perguntando pelo arquivo ativo ou
+ * escolham uma pasta de testes incorreta.
+ */
+export function javaUnitTestCreationTarget(
+  request: string,
+  priority: readonly string[]
+): string | undefined {
+  const normalized = String(request ?? '').replace(/\s+/g, ' ').trim();
+  if (!DIRECT_TEST_CREATION.test(normalized) || !/\bunit[aá]rio(?:s)?\b/i.test(normalized)) return undefined;
+
+  const packageMatch = normalized.match(/\b([a-z_$][\w$]*(?:\.[a-z_$][\w$]*){2,})\b/i);
+  const packageName = packageMatch?.[1];
+  if (!packageName || /\.(?:java|ts|tsx|js|json|xml|yml|yaml)$/i.test(packageName)) return undefined;
+
+  const source = priority
+    .map(value => String(value ?? '').split('#')[0]?.replace(/\\/g, '/'))
+    .find(value => /\/src\/main\/java\/.*\.java$/i.test(value ?? ''));
+  if (!source) return undefined;
+
+  const marker = source.toLowerCase().indexOf('/src/main/java/');
+  if (marker < 0) return undefined;
+  const modulePrefix = source.slice(0, marker);
+  const className = path.posix.basename(source, '.java');
+  if (!/^[A-Za-z_$][\w$]*$/.test(className)) return undefined;
+
+  return path.posix.join(
+    modulePrefix,
+    'src/test/java',
+    packageName.replace(/\./g, '/'),
+    `${className}Test.java`
+  );
+}
+
 export function agentOutputTokenFloor(request: string): number {
   return isFileCreationTask(request) ? 512 : 0;
 }

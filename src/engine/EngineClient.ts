@@ -405,8 +405,8 @@ export class EngineClient {
     });
     this.ready = ready;
 
-    worker.stdout?.on('data', chunk => this.logger.debug('model', `[Engine stdout] ${String(chunk).trim()}`));
-    worker.stderr?.on('data', chunk => this.logger.debug('model', `[Engine stderr] ${String(chunk).trim()}`));
+    worker.stdout?.on('data', chunk => this.logger.trace('model', `[Engine stdout] ${String(chunk).trim()}`));
+    worker.stderr?.on('data', chunk => this.logger.trace('model', `[Engine stderr] ${String(chunk).trim()}`));
     worker.on('message', message => this.onMessage(message));
     worker.on('exit', (code, signal) => this.onExit(worker, new Error(`Motor encerrado: code=${code}; signal=${signal}`)));
     worker.on('error', error => this.onExit(worker, error));
@@ -493,10 +493,10 @@ export class EngineClient {
     return new Promise<T>((resolve, reject) => {
       let timer: NodeJS.Timeout | undefined;
       const abort = (): void => {
-        this.logger.info(
+        this.logger.trace(
           'agent',
           [
-            '[Abort][2/4] Sinal recebido pelo EngineClient.',
+            '[Abort] Sinal recebido pelo EngineClient.',
             `requestId=${requestId}`,
             `método=${method}`,
             `worker=${Boolean(this.worker)}`,
@@ -514,9 +514,9 @@ export class EngineClient {
               { name: 'AbortError' }
             )
           );
-          this.logger.info(
+          this.logger.trace(
             'agent',
-            `[Abort][2/4] Requisição local encerrada. requestId=${requestId}.`
+            `[Abort] Requisição local encerrada. requestId=${requestId}.`
           );
         }
 
@@ -532,9 +532,9 @@ export class EngineClient {
                 );
                 return;
               }
-              this.logger.info(
+              this.logger.trace(
                 'agent',
-                `[Abort][2/4] Cancel enviado ao worker. requestId=${requestId}.`
+                `[Abort] Cancel enviado ao worker. requestId=${requestId}.`
               );
             }
           );

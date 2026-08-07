@@ -468,7 +468,7 @@ export class LlamaServerEngine {
         this.agentHistory.pop();
         const elapsed = Date.now() - started;
         if (options.signal?.aborted || (error as Error)?.name === 'AbortError') {
-          this.log('info', `[Abort][4/4] Sinal recebido pelo LlamaServerEngine. tempo=${elapsed}ms`);
+          this.log('trace', `[Abort] Sinal recebido pelo LlamaServerEngine. tempo=${elapsed}ms`);
         } else {
           this.log('error', `[Agent][Prompt] Falhou após ${elapsed} ms: ${error instanceof Error ? error.message : String(error)}`);
         }

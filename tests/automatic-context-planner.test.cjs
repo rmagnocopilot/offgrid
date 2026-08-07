@@ -119,6 +119,8 @@ test('catálogo substitui 1.5B pelo Qwen3 4B e define no-think', () => {
   assert.ok(qwen4b);
   assert.equal(qwen4b.promptMode, 'no-think');
   assert.equal(qwen4b.contextProfile.base, 8192);
+  assert.equal(qwen4b.contextProfile.complex, 8192);
+  assert.equal(qwen4b.contextProfile.maximum, 12288);
   assert.equal(qwen4b.sha256, '7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5');
 });
 
@@ -148,6 +150,15 @@ test('criação de um único arquivo não amplia o contexto como tarefa multi-ar
   });
   assert.equal(estimate.complexity, 'simple');
 });
+test('criação de um teste com dois arquivos de referência continua simples', () => {
+  const estimate = estimateTaskComplexity({
+    request: 'Crie o teste unitário seguindo o teste de exemplo existente.',
+    estimatedFiles: 2,
+    createsFiles: true
+  });
+  assert.equal(estimate.complexity, 'simple');
+});
+
 
 test('dois arquivos estimados já caracterizam tarefa multi-arquivo', () => {
   const estimate = estimateTaskComplexity({
@@ -155,6 +166,12 @@ test('dois arquivos estimados já caracterizam tarefa multi-arquivo', () => {
     estimatedFiles: 2
   });
   assert.equal(estimate.complexity, 'multiFile');
+});
+
+test('criação genérica não oferece get_active_file quando já há contexto prioritário', () => {
+  const extension = fs.readFileSync(path.join(root, 'src', 'extension.ts'), 'utf8');
+  assert.match(extension, /if \(!contextPriority\.length\) fileCreationTools\.add\('get_active_file'\)/);
+  assert.doesNotMatch(extension, /const fileCreationTools = new Set\(\[\s*'get_active_file'/);
 });
 
 test('tarefa simples limita o contexto automático do workspace a um arquivo', () => {

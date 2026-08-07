@@ -2,17 +2,23 @@
   <img src="resources/branding/offgrid-logo.png" alt="Offgrid" width="260">
 </p>
 
-# Offgrid 2.0.5
+# Offgrid 2.0.6
 
 Assistente local e offline para Visual Studio Code, reescrito em **TypeScript**. A arquitetura segue a separação usada pelo Unplugged entre Agente, ferramentas, contexto, segurança, motor LLM e interface, preservando os recursos adicionais construídos no Offgrid.
 
-## Novidades da versão 2.0.5
+## Novidades da versão 2.0.6
 
-- fallback automático para o motor embarcado `node-llama-cpp` quando o Windows bloqueia a execução do `llama-server`;
-- suporte embarcado aos backends CPU e Vulkan no Windows;
-- compatibilidade com ambientes corporativos que aplicam políticas de grupo contra executáveis baixados;
-- manutenção do `llama-server` como motor principal em máquinas sem restrições;
-- mensagem de diagnóstico indicando quando o motor alternativo é ativado.
+- Modo Agente otimizado para Qwen3 4B, com contexto de 8K nas tarefas simples e multi-arquivo para reduzir pressão de memória e melhorar a velocidade de geração;
+- identificação mais precisa de tarefas Java e de testes unitários, incluindo classes de referência citadas no pedido;
+- localização prioritária de testes existentes e inferência da pasta `src/test/java` para novos testes;
+- evita chamadas redundantes de `get_active_file` quando o alvo já está carregado no contexto;
+- chamadas de ferramenta e criação de arquivos usam o orçamento completo de saída, sem o antigo corte artificial das etapas seguintes;
+- recuperação mais robusta para respostas JSON de ferramenta incompletas ou fora do envelope esperado;
+- fallback automático para `node-llama-cpp` quando políticas corporativas bloqueiam o `llama-server`;
+- melhorias de segurança e rollback na aplicação de alterações;
+- interface simplificada para **Chat**, **Planejar** e **Agente**, com seletor de modo mais compacto;
+- logs de produção mais limpos: nível padrão `info`; detalhes de RPC, heartbeat e runtime nativo ficam em `debug/trace` para diagnóstico.
+
 ## Abrir o Offgrid
 
 Após instalar o VSIX, clique no ícone **Offgrid** na Activity Bar, a barra vertical esquerda do VS Code. Também é possível clicar no status `Offgrid` na barra inferior ou executar `Offgrid: Abrir Chat`.
@@ -23,7 +29,6 @@ Na primeira instalação, o painel é aberto uma única vez para apresentar o se
 
 - **Chat:** conversa comum, com contexto opcional de arquivos.
 - **Planejar:** pesquisa o workspace e propõe um plano, sem ferramentas de escrita.
-- **Somente leitura:** permite pesquisa, símbolos, referências, Git e diagnósticos, sem escrita.
 - **Agente:** executa ferramentas reais, prepara alterações e mostra diff antes de salvar.
 
 O Agente é implementado em TypeScript/Node.js usando a API do VS Code. Python não é necessário.
@@ -114,14 +119,14 @@ npm run package
 Arquivo esperado:
 
 ```text
-offgrid-2.0.5.vsix
+offgrid-2.0.6.vsix
 ```
 
 Os modelos em `globalStorage/rmagnocopilot.offgrid/models` permanecem após a atualização do VSIX.
 
 ## Logs e pastas
 
-O canal `Exibir → Saída → Offgrid` e a pasta de logs registram motor, download, modelos, Agente e diagnósticos. Os nomes e horários dos arquivos usam a data local do computador. Os arquivos são UTF-8, giram em 10 MB e mantêm até dez arquivos por categoria.
+O canal `Exibir → Saída → Offgrid` e a pasta de logs registram motor, download, modelos, Agente e diagnósticos. O nível padrão é **`info`**, mantendo eventos relevantes, avisos e erros sem poluir a saída com heartbeat, RPC e detalhes internos do `llama.cpp`. Para investigação pontual, altere `offgrid.logLevel` para `debug` ou `trace`; `offgrid.diagnosticMode` continua desativado por padrão e pode registrar prompts e trechos de código. Os nomes e horários dos arquivos usam a data local do computador. Os arquivos são UTF-8, giram em 10 MB e mantêm até dez arquivos por categoria.
 
 Comandos disponíveis:
 

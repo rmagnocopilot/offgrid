@@ -136,7 +136,6 @@ function resolveNamedJavaReferences(root: string, request: string | undefined, p
   for (const match of String(request ?? '').matchAll(/\b([A-Z][A-Za-z0-9_$]{2,})\b/g)) {
     const name = match[1];
     if (!name || seenNames.has(name.toLowerCase())) continue;
-    // Evita palavras comuns em caixa alta e mantém o custo da busca limitado.
     if (/^(?:JSON|HTTP|HTTPS|REST|CRUD|DTO|VO|API|SQL|XML|HTML|CSS|JUNIT)$/i.test(name)) continue;
     seenNames.add(name.toLowerCase());
     names.push(name);
@@ -144,35 +143,57 @@ function resolveNamedJavaReferences(root: string, request: string | undefined, p
   }
   if (!names.length) return [];
 
-  const targets = new Map(names.map(name => [`${name.toLowerCase()}.java`, name]));
+  const moduleRoots = [...new Set(priority.map(modulePrefixRaw).filter(Boolean))];
+  const packageHints = extractJavaPackageHints(request);
   const matches = new Map<string, string[]>();
-  const ignored = new Set(['.git', 'node_modules', 'out', 'dist', 'build', 'coverage', '.vscode-test', 'target']);
-  const stack = [root];
-  let visited = 0;
+  const addMatch = (name: string, relative: string): void => {
+    const normalized = relative.replace(/\\/g, '/');
+    const list = matches.get(name) ?? [];
+    if (!list.some(item => item.toLowerCase() === normalized.toLowerCase())) list.push(normalized);
+    matches.set(name, list);
+  };
 
-  while (stack.length && visited < 20_000) {
-    const directory = stack.pop();
-    if (!directory) break;
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      visited += 1;
-      if (visited >= 20_000) break;
-      if (entry.isDirectory()) {
-        if (!ignored.has(entry.name)) stack.push(path.join(directory, entry.name));
-        continue;
+  // Caminho direto primeiro. Pedidos corporativos costumam informar o pacote
+  // de destino, por exemplo "br.gov.caixa.siavo.tests.dto". Resolver esse
+  // caminho evita percorrer dezenas de milhares de arquivos antes de achar o
+  // teste-exemplo citado pelo usuário.
+  for (const moduleRoot of moduleRoots) {
+    for (const packageName of packageHints) {
+      const packagePath = packageName.replace(/\./g, '/');
+      for (const name of names) {
+        for (const sourceRoot of ['src/test/java', 'src/main/java']) {
+          const candidate = path.posix.join(moduleRoot, sourceRoot, packagePath, `${name}.java`);
+          if (contextFileExists(root, candidate)) addMatch(name, candidate);
+        }
       }
-      if (!entry.isFile()) continue;
-      const typeName = targets.get(entry.name.toLowerCase());
-      if (!typeName) continue;
-      const relative = path.relative(root, path.join(directory, entry.name)).replace(/\\/g, '/');
-      const list = matches.get(typeName) ?? [];
-      list.push(relative);
-      matches.set(typeName, list);
     }
   }
 
-  const priorityModules = new Set(priority.map(modulePrefix).filter(Boolean));
+  const unresolved = new Set(names.filter(name => !(matches.get(name)?.length)));
+  if (unresolved.size) {
+    const targetFiles = new Map([...unresolved].map(name => [`${name.toLowerCase()}.java`, name]));
+    const searchRoots: string[] = [];
+    for (const moduleRoot of moduleRoots) {
+      searchRoots.push(
+        path.posix.join(moduleRoot, 'src/test/java'),
+        path.posix.join(moduleRoot, 'src/main/java')
+      );
+    }
+    if (!searchRoots.length) searchRoots.push('.');
+
+    // Busca primeiro dentro do(s) módulo(s) do arquivo ativo/citado. O limite é
+    // deliberadamente maior que o antigo 20k porque workspaces Maven grandes
+    // ultrapassavam esse valor e a referência explícita nunca chegava ao prompt.
+    for (const relativeRoot of searchRoots) {
+      scanExactJavaNames(root, relativeRoot, targetFiles, addMatch, 100_000);
+      for (const name of [...unresolved]) {
+        if (matches.get(name)?.length) unresolved.delete(name);
+      }
+      if (!unresolved.size) break;
+    }
+  }
+
+  const priorityModules = new Set(moduleRoots.map(value => value.toLowerCase()));
   const resolved: string[] = [];
   for (const name of names) {
     const candidates = matches.get(name) ?? [];
@@ -182,9 +203,78 @@ function resolveNamedJavaReferences(root: string, request: string | undefined, p
     }
     const sameModule = candidates.filter(candidate => priorityModules.has(modulePrefix(candidate)));
     if (sameModule.length === 1) resolved.push(sameModule[0]!);
-    // Em caso de ambiguidade real, não escolhe silenciosamente o arquivo errado.
   }
   return resolved;
+}
+
+function extractJavaPackageHints(request: string | undefined): string[] {
+  const text = String(request ?? '');
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/\b([a-z_$][\w$]*(?:\.[a-z_$][\w$]*){2,})\b/gi)) {
+    const value = match[1];
+    if (!value || /\.(?:java|ts|tsx|js|json|xml|yml|yaml)$/i.test(value)) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+    if (result.length >= 6) break;
+  }
+  return result;
+}
+
+function modulePrefixRaw(filePath: string): string {
+  const normalized = String(filePath ?? '').split('#')[0]?.replace(/\\/g, '/') ?? '';
+  const marker = normalized.toLowerCase().indexOf('/src/');
+  return marker >= 0 ? normalized.slice(0, marker) : '';
+}
+
+function contextFileExists(root: string, relative: string): boolean {
+  try {
+    const safe = normalizeRelativePath(relative);
+    const absolute = resolveInsideRoot(root, safe);
+    return fs.existsSync(absolute) && fs.statSync(absolute).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function scanExactJavaNames(
+  root: string,
+  relativeRoot: string,
+  targets: Map<string, string>,
+  add: (name: string, relative: string) => void,
+  limit: number
+): void {
+  let start: string;
+  try {
+    start = resolveInsideRoot(root, normalizeRelativePath(relativeRoot));
+  } catch {
+    return;
+  }
+  if (!fs.existsSync(start)) return;
+
+  const ignored = new Set(['.git', 'node_modules', 'out', 'dist', 'build', 'coverage', '.vscode-test', 'target']);
+  const queue = [start];
+  let visited = 0;
+  while (queue.length && visited < limit) {
+    const directory = queue.shift();
+    if (!directory) break;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      visited += 1;
+      if (visited >= limit) break;
+      if (entry.isDirectory()) {
+        if (!ignored.has(entry.name)) queue.push(path.join(directory, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const name = targets.get(entry.name.toLowerCase());
+      if (!name) continue;
+      add(name, path.relative(root, path.join(directory, entry.name)).replace(/\\/g, '/'));
+    }
+  }
 }
 
 function modulePrefix(filePath: string): string {
