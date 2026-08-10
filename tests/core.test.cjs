@@ -50,6 +50,15 @@ test('deriva destino de teste Java pelo pacote informado e arquivo ativo', () =>
   );
   assert.equal(target, 'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/TarifaSiapfDTOTest.java');
 });
+
+test('deriva destino de teste Java pelo mesmo pacote do teste-exemplo', () => {
+  const target = javaUnitTestCreationTarget(
+    'crie os testes unitarios dessa classe; o novo teste deve estar no mesmo pacote de AcompanhamentoObrasHistoricoDTOTest',
+    ['siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java'],
+    ['siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/AcompanhamentoObrasHistoricoDTOTest.java']
+  );
+  assert.equal(target, 'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/TarifaSiapfDTOTest.java');
+});
 test('arquivo citado vence seleção e arquivo fixado', () => {
   const values = buildContextPriority({ prompt: 'altere src/a.ts', selectionFile: 'src/selection.ts', pinnedFile: 'src/pinned.ts', relatedFiles: ['src/related.ts'] });
   assert.deepEqual(values, ['src/a.ts','src/selection.ts','src/pinned.ts','src/related.ts']);
@@ -703,6 +712,66 @@ test('contexto encontra teste-exemplo Java citado no pacote de destino', async t
     'siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java',
     'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/AcompanhamentoObrasHistoricoDTOTest.java'
   ]);
+});
+
+test('referência Java citada vence prioridades secundárias quando só cabem dois arquivos', async t => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-java-priority-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const files = {
+    'siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java': 'public class TarifaSiapfDTO { private String codigo; }',
+    'siavo-ejb/src/main/java/br/gov/caixa/siavo/util/SiavoConstantes.java': 'public class SiavoConstantes {}',
+    'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/AcompanhamentoObrasHistoricoDTOTest.java': 'public class AcompanhamentoObrasHistoricoDTOTest {}'
+  };
+  for (const [relative, content] of Object.entries(files)) {
+    const absolute = path.join(dir, relative);
+    await fsp.mkdir(path.dirname(absolute), { recursive: true });
+    await fsp.writeFile(absolute, content, 'utf8');
+  }
+
+  const context = await buildAgentWorkspaceContext({
+    workspaceRoot: dir,
+    priority: [
+      'siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java',
+      'siavo-ejb/src/main/java/br/gov/caixa/siavo/util/SiavoConstantes.java'
+    ],
+    request: 'crie os testes unitarios dessa classe seguindo AcompanhamentoObrasHistoricoDTOTest',
+    maxFiles: 2,
+    maxCharsPerFile: 1000,
+    maxTotalChars: 2000
+  });
+
+  assert.deepEqual(context.files.map(file => file.filePath), [
+    'siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java',
+    'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/AcompanhamentoObrasHistoricoDTOTest.java'
+  ]);
+});
+
+test('truncamento Java preserva início e fim do arquivo em contexto 4K', async t => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-java-truncate-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const relative = 'm/src/main/java/com/acme/Dto.java';
+  const absolute = path.join(dir, relative);
+  await fsp.mkdir(path.dirname(absolute), { recursive: true });
+  await fsp.writeFile(absolute, [
+    'package com.acme;',
+    'public class Dto {',
+    '  private String codigo;',
+    '  ' + 'x'.repeat(4000),
+    '  @Override public int hashCode() { return 31; }',
+    '}'
+  ].join('\n'), 'utf8');
+
+  const context = await buildAgentWorkspaceContext({
+    workspaceRoot: dir,
+    priority: [relative],
+    maxFiles: 1,
+    maxCharsPerFile: 700,
+    maxTotalChars: 700
+  });
+  assert.match(context.files[0].content, /package com\.acme/);
+  assert.match(context.files[0].content, /hashCode/);
+  assert.match(context.files[0].content, /contexto intermediário omitido/);
 });
 
 test('contexto de teste Java não carrega spec TypeScript de outro módulo', async t => {

@@ -2,22 +2,21 @@
   <img src="resources/branding/offgrid-logo.png" alt="Offgrid" width="260">
 </p>
 
-# Offgrid 2.0.6
+# Offgrid 2.0.7
 
 Assistente local e offline para Visual Studio Code, reescrito em **TypeScript**. A arquitetura segue a separação usada pelo Unplugged entre Agente, ferramentas, contexto, segurança, motor LLM e interface, preservando os recursos adicionais construídos no Offgrid.
 
-## Novidades da versão 2.0.6
+## Novidades da versão 2.0.7
 
-- Modo Agente otimizado para Qwen3 4B, com contexto de 8K nas tarefas simples e multi-arquivo para reduzir pressão de memória e melhorar a velocidade de geração;
-- identificação mais precisa de tarefas Java e de testes unitários, incluindo classes de referência citadas no pedido;
-- localização prioritária de testes existentes e inferência da pasta `src/test/java` para novos testes;
-- evita chamadas redundantes de `get_active_file` quando o alvo já está carregado no contexto;
-- chamadas de ferramenta e criação de arquivos usam o orçamento completo de saída, sem o antigo corte artificial das etapas seguintes;
-- recuperação mais robusta para respostas JSON de ferramenta incompletas ou fora do envelope esperado;
-- fallback automático para `node-llama-cpp` quando políticas corporativas bloqueiam o `llama-server`;
-- melhorias de segurança e rollback na aplicação de alterações;
-- interface simplificada para **Chat**, **Planejar** e **Agente**, com seletor de modo mais compacto;
-- logs de produção mais limpos: nível padrão `info`; detalhes de RPC, heartbeat e runtime nativo ficam em `debug/trace` para diagnóstico.
+- corrige o Modo Agente quando o Qwen3 4B precisa operar em **4096 tokens** por limitação de memória: o prompt inicial passa a reservar espaço para a continuação do AgentLoop em vez de ocupar toda a janela logo no primeiro passo;
+- em fallback 4K, usa prompt de sistema compacto e limita `AGENTS.md` para preservar espaço para o código realmente necessário;
+- geração de teste Java prioriza exatamente **classe de origem + teste-exemplo citado**, mesmo quando o ContextManager encontrou arquivos secundários;
+- pedidos como “crie os testes unitários ... no mesmo pacote de `AcompanhamentoObrasHistoricoDTOTest`” agora derivam automaticamente o caminho do novo `*Test.java` a partir do teste de referência;
+- arquivos Java truncados preservam início e fim, mantendo imports/campos e também métodos finais como `equals`, `hashCode` ou os últimos casos de teste;
+- criação de arquivos reserva até **1024 tokens de saída em contexto 4K**, sem reintroduzir o antigo limite artificial de 256 tokens;
+- se o tokenizer real ainda considerar o prompt grande demais em 4K, o Agente executa **uma única compactação de emergência**, somente antes de qualquer ferramenta ter sido executada, evitando duplicar alterações;
+- Qwen3 4B continua preferindo 8K automaticamente quando houver memória suficiente e pode cair para 4K de forma funcional quando a máquina estiver mais pressionada;
+- mantém as melhorias da 2.0.6: fallback embarcado `node-llama-cpp`, logs de produção mais limpos, interface Chat/Planejar/Agente e robustez de revisão/rollback.
 
 ## Abrir o Offgrid
 
@@ -119,7 +118,7 @@ npm run package
 Arquivo esperado:
 
 ```text
-offgrid-2.0.6.vsix
+offgrid-2.0.7.vsix
 ```
 
 Os modelos em `globalStorage/rmagnocopilot.offgrid/models` permanecem após a atualização do VSIX.

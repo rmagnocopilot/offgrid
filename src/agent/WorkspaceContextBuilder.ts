@@ -65,15 +65,22 @@ export async function buildAgentWorkspaceContext(params: {
     queued.push({ filePath: relative, reason, depth });
   };
 
-  for (const [index, item] of params.priority.entries()) {
-    enqueue(item, index === 0 ? 'arquivo citado ou ativo prioritário' : 'arquivo priorizado pelo contexto', 0);
+  // O primeiro arquivo prioritário é normalmente a classe ativa/alvo. Em
+  // tarefas Java, referências citadas explicitamente pelo usuário (por exemplo
+  // AcompanhamentoObrasHistoricoDTOTest) entram logo depois, antes de arquivos
+  // secundários inferidos pelo ContextManager. Assim um limite de 2 arquivos
+  // ainda preserva exatamente origem + exemplo.
+  if (params.priority[0]) {
+    enqueue(params.priority[0], 'arquivo citado ou ativo prioritário', 0);
   }
 
-  // Pedidos Java frequentemente citam classes sem a extensão (por exemplo,
-  // "crie XTest para X"). Sem resolver esses nomes, o agente recebe apenas o
-  // arquivo ativo e pode inventar campos da classe-alvo.
-  for (const namedJavaFile of resolveNamedJavaReferences(root, params.request, params.priority)) {
-    enqueue(namedJavaFile, 'classe Java citada no pedido', 0);
+  const namedJavaReferences = resolveNamedJavaReferences(root, params.request, params.priority);
+  for (const namedJavaFile of namedJavaReferences) {
+    enqueue(namedJavaFile, 'classe Java citada explicitamente no pedido', 0);
+  }
+
+  for (const item of params.priority.slice(1)) {
+    enqueue(item, 'arquivo priorizado pelo contexto', 0);
   }
 
   while (queued.length && files.length < maxFiles && totalChars < maxTotalChars) {
@@ -86,9 +93,8 @@ export async function buildAgentWorkspaceContext(params: {
     const allowed = Math.min(maxCharsPerFile, maxTotalChars - totalChars);
     if (allowed <= 0) break;
     const truncated = content.length > allowed;
-    const truncationMarker = '\n/* contexto truncado pelo Offgrid */';
     const selected = truncated
-      ? `${content.slice(0, Math.max(0, allowed - truncationMarker.length))}${truncationMarker}`
+      ? compactContextContent(content, allowed, candidate.filePath)
       : content;
     files.push({ filePath: candidate.filePath, reason: candidate.reason, content: selected, truncated });
     totalChars += selected.length;
@@ -129,6 +135,25 @@ export async function buildAgentWorkspaceContext(params: {
   return { files, text };
 }
 
+
+
+function compactContextContent(content: string, allowed: number, filePath: string): string {
+  const marker = '\n/* ... contexto intermediário omitido pelo Offgrid ... */\n';
+  if (allowed <= marker.length + 64) return content.slice(0, Math.max(0, allowed));
+
+  // Em código Java, apenas o início elimina frequentemente equals/hashCode,
+  // getters ou os últimos @Test. Preservar início + fim mantém imports/campos
+  // e também a parte final da implementação sem aumentar o orçamento.
+  if (/\.java$/i.test(filePath) && content.length > allowed) {
+    const payload = allowed - marker.length;
+    const head = Math.max(64, Math.floor(payload * 0.68));
+    const tail = Math.max(0, payload - head);
+    return `${content.slice(0, head)}${marker}${tail ? content.slice(-tail) : ''}`.slice(0, allowed);
+  }
+
+  const truncationMarker = '\n/* contexto truncado pelo Offgrid */';
+  return `${content.slice(0, Math.max(0, allowed - truncationMarker.length))}${truncationMarker}`;
+}
 
 function resolveNamedJavaReferences(root: string, request: string | undefined, priority: string[]): string[] {
   const names: string[] = [];

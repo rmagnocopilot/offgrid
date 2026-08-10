@@ -10,13 +10,20 @@ const { tryPrepareSimpleEditFastPath } = require('../out/agent/SimpleEditFastPat
 const {
   agentOutputTokenFloor,
   generatedFileContentIssue,
-  isFileCreationTask
+  isFileCreationTask,
+  isJavaUnitTestCreationTask
 } = require('../out/agent/AgentTaskPolicy');
 
-test('reserva 512 tokens para criacao de arquivo de testes', () => {
+test('reserva orçamento estendido para criação de arquivo de testes', () => {
   const request = 'Crie 2 testes simples e gere cliente-vip-list.component.spec.ts';
   assert.equal(isFileCreationTask(request), true);
-  assert.equal(agentOutputTokenFloor(request), 512);
+  assert.equal(agentOutputTokenFloor(request), 768);
+});
+
+
+test('reconhece criação de teste unitário Java em português', () => {
+  const request = 'crie os testes unitarios dessa classe seguindo AcompanhamentoObrasHistoricoDTOTest';
+  assert.equal(isJavaUnitTestCreationTask(request), true);
 });
 
 test('mantem orcamento padrao para edicao simples', () => {

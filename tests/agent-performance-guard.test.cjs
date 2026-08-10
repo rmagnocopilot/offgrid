@@ -9,9 +9,9 @@ async function source(relativePath) {
   return fsp.readFile(path.join(root, relativePath), 'utf8');
 }
 
-test('criacao de arquivo usa 512 tokens', async () => {
+test('criacao de arquivo usa piso de 768 tokens', async () => {
   const policy = await source('src/agent/AgentTaskPolicy.ts');
-  assert.match(policy, /isFileCreationTask\(request\) \? 512 : 0/);
+  assert.match(policy, /isFileCreationTask\(request\) \? 768 : 0/);
 });
 
 test('todas as etapas usam o orçamento completo calculado para a tarefa', async () => {
@@ -57,4 +57,14 @@ test('revisão em lote valida conflitos e reverte gravações parciais', async (
   assert.match(tools, /restoreEntry/);
   assert.match(tools, /Falha adicional ao reverter alterações/);
   assert.match(tools, /cancelledCreation: true/);
+});
+
+
+test('fallback 4K reserva continuação e possui compactação de emergência', async () => {
+  const budget = await source('src/agent/AgentContextBudget.ts');
+  const extension = await source('src/extension.ts');
+  assert.match(budget, /continuationTokens/);
+  assert.match(budget, /contextSize <= 4_096/);
+  assert.match(extension, /Prompt ainda excedeu 4K; aplicando compactação de emergência/);
+  assert.match(extension, /agentToolExecutions === 0/);
 });

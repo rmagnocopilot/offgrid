@@ -3,6 +3,7 @@ import * as path from 'node:path';
 const DIRECT_FILE_CREATION = /\b(?:crie|criar|gere|gerar|produza|produzir|monte|montar)\s+(?:(?:um|uma|o|a)\s+)?(?:(?:novo|nova)\s+)?(?:arquivo|spec(?:\.ts)?|arquivo\s+de\s+testes?|componente|servi(?:c|\u00e7)o|service|classe|m(?:o|\u00f3)dulo)\b/i;
 const ADD_NEW_FILE = /\b(?:adicione|adicionar|implemente|implementar)\s+(?:(?:um|uma|o|a)\s+)?(?:novo|nova)\s+(?:arquivo|spec(?:\.ts)?|componente|servi(?:c|\u00e7)o|service|classe|m(?:o|\u00f3)dulo)\b/i;
 const DIRECT_TEST_CREATION = /\b(?:crie|criar|gere|gerar|adicione|adicionar|escreva|escrever)\b[\s\S]{0,100}\b\d*\s*testes?\b/i;
+const JAVA_UNIT_TEST_CREATION = /\b(?:testes?\s+unit[aá]rio(?:s)?|unit\s+tests?|junit)\b/i;
 
 const PLACEHOLDER_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bTODO\b/i, label: 'TODO' },
@@ -36,6 +37,14 @@ export function isFileCreationTask(request: string): boolean {
   return DIRECT_TEST_CREATION.test(normalized)
     || DIRECT_FILE_CREATION.test(normalized)
     || ADD_NEW_FILE.test(normalized);
+}
+
+/**
+ * Identifica pedidos explícitos de criação de teste unitário Java.
+ */
+export function isJavaUnitTestCreationTask(request: string): boolean {
+  const normalized = String(request ?? '').replace(/\s+/g, ' ').trim();
+  return isFileCreationTask(normalized) && JAVA_UNIT_TEST_CREATION.test(normalized);
 }
 
 /**
@@ -74,14 +83,11 @@ export function workspaceRootCreationTarget(
  */
 export function javaUnitTestCreationTarget(
   request: string,
-  priority: readonly string[]
+  priority: readonly string[],
+  referenceFiles: readonly string[] = []
 ): string | undefined {
   const normalized = String(request ?? '').replace(/\s+/g, ' ').trim();
-  if (!DIRECT_TEST_CREATION.test(normalized) || !/\bunit[aá]rio(?:s)?\b/i.test(normalized)) return undefined;
-
-  const packageMatch = normalized.match(/\b([a-z_$][\w$]*(?:\.[a-z_$][\w$]*){2,})\b/i);
-  const packageName = packageMatch?.[1];
-  if (!packageName || /\.(?:java|ts|tsx|js|json|xml|yml|yaml)$/i.test(packageName)) return undefined;
+  if (!isJavaUnitTestCreationTask(normalized)) return undefined;
 
   const source = priority
     .map(value => String(value ?? '').split('#')[0]?.replace(/\\/g, '/'))
@@ -94,16 +100,41 @@ export function javaUnitTestCreationTarget(
   const className = path.posix.basename(source, '.java');
   if (!/^[A-Za-z_$][\w$]*$/.test(className)) return undefined;
 
-  return path.posix.join(
-    modulePrefix,
-    'src/test/java',
-    packageName.replace(/\./g, '/'),
-    `${className}Test.java`
-  );
+  const packageMatch = normalized.match(/\b([a-z_$][\w$]*(?:\.[a-z_$][\w$]*){2,})\b/i);
+  const explicitPackage = packageMatch?.[1];
+  if (explicitPackage && !/\.(?:java|ts|tsx|js|json|xml|yml|yaml)$/i.test(explicitPackage)) {
+    return path.posix.join(
+      modulePrefix,
+      'src/test/java',
+      explicitPackage.replace(/\./g, '/'),
+      `${className}Test.java`
+    );
+  }
+
+  // Quando o usuário diz "no mesmo pacote" e cita um teste-exemplo, use o
+  // diretório desse teste como destino. Isso evita que modelos pequenos
+  // inventem o pacote após ler a referência.
+  if (/\b(?:mesm[oa]\s+(?:pacote|pasta)|same\s+package)\b/i.test(normalized)) {
+    const normalizedModule = modulePrefix.toLowerCase();
+    const example = referenceFiles
+      .map(value => String(value ?? '').split('#')[0]?.replace(/\\/g, '/'))
+      .find(value => {
+        if (!value || !/\/src\/test\/java\/.*(?:Test|Tests)\.java$/i.test(value)) return false;
+        if (path.posix.basename(value).toLowerCase() === `${className.toLowerCase()}test.java`) return false;
+        const valueMarker = value.toLowerCase().indexOf('/src/test/java/');
+        const valueModule = valueMarker >= 0 ? value.slice(0, valueMarker).toLowerCase() : '';
+        return valueModule === normalizedModule;
+      });
+    if (example) return path.posix.join(path.posix.dirname(example), `${className}Test.java`);
+  }
+
+  return undefined;
 }
 
 export function agentOutputTokenFloor(request: string): number {
-  return isFileCreationTask(request) ? 512 : 0;
+  // 768 força o orçamento estendido (até 25% da janela), permitindo gerar um
+  // arquivo de teste completo em 4K sem reintroduzir o antigo corte de 256.
+  return isFileCreationTask(request) ? 768 : 0;
 }
 
 export function generatedFileContentIssue(

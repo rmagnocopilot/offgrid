@@ -16,6 +16,7 @@ import { ContextManager } from './context/ContextManager';
 import { buildTemporalContext } from './context/TemporalContext';
 import { loadProjectInstructions } from './context/ProjectInstructions';
 import { buildAgentWorkspaceContext } from './agent/WorkspaceContextBuilder';
+import { calculateAgentContextBudget, detectModelTier } from './agent/AgentContextBudget';
 import {
   contextFallbacks, estimateRequiredBytes, estimateTaskComplexity, formatContextPlan, planContext, shouldExpandContext,
   type ContextMode, type ContextPlan, type ContextTaskEstimate
@@ -43,6 +44,7 @@ import {
   agentOutputTokenFloor,
   generatedFileContentIssue,
   isFileCreationTask,
+  isJavaUnitTestCreationTask,
   javaUnitTestCreationTarget,
   workspaceRootCreationTarget
 } from './agent/AgentTaskPolicy';
@@ -399,12 +401,13 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
       );
       const fileCreationTask = mode === 'agent' && isFileCreationTask(text);
       const genericFileCreationTask = fileCreationTask && !frontendCrudAnalysis && !backendServiceAnalysis && !backendEndpointAnalysis && !fullStackFlowAnalysis && !fullStackRelationRefactorAnalysis;
+      const javaUnitTestTask = genericFileCreationTask && isJavaUnitTestCreationTask(text);
       const rootCreationTarget = workspaceRootCreationTarget(
         layeredTask.explicitFiles,
         genericFileCreationTask
       );
       const contextPriority = rootCreationTarget ? [] : priority;
-      const javaTestCreationTarget = javaUnitTestCreationTarget(text, contextPriority);
+      let javaTestCreationTarget = javaUnitTestCreationTarget(text, contextPriority);
       const fileCreationTools = new Set([
         'list_files',
         'read_file',
@@ -728,20 +731,27 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         `[Flow][2/6] Iniciando montagem do prompt de sistema. modelTier=${modelTier}`
       );
 
+      const compactAgentContext = contextSize <= 4_096;
       const baseAgentSystem = await buildAgentSystemPrompt(
         s,
         selectedSchemas,
         mode,
         text,
         modelTier,
-        contextPriority
+        contextPriority,
+        compactAgentContext
       );
-      // OFFGRID_AGENTS_MD_AGENT: mantém as regras no prompt de sistema.
+      // OFFGRID_AGENTS_MD_AGENT: mantém as regras no prompt de sistema, mas
+      // limita o volume em fallback 4K para não consumir toda a janela antes
+      // mesmo do código de origem e do teste-exemplo.
       const agentInstructionContext = await loadProjectInstructions({
         workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
         targetFiles: rootCreationTarget
           ? [rootCreationTarget]
-          : s.contextManager.priority(text)
+          : s.contextManager.priority(text),
+        ...(compactAgentContext
+          ? { maxFiles: 3, maxCharsPerFile: 1_000, maxTotalChars: 1_400 }
+          : {})
       });
       if (agentInstructionContext.files.length) {
         s.logger.debug('agent', `[AGENTS.md] Agente: ${agentInstructionContext.files.map(file => file.filePath).join(' → ')}`);
@@ -755,23 +765,12 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         `[Flow][2/6] Prompt de sistema concluído em ${Date.now() - systemPromptStartedAt} ms; caracteres=${agentSystem.length}.`
       );
 
-      const creationTargetEnvelope = rootCreationTarget
-        ? [
-            '<destino_criacao_obrigatorio>',
-            `Crie exatamente o arquivo "${rootCreationTarget}" na raiz do workspace.`,
-            'Não escolha subpasta e não use o arquivo ativo como destino ou contexto.',
-            '</destino_criacao_obrigatorio>'
-          ].join('\n')
-        : javaTestCreationTarget
-          ? [
-              '<destino_criacao_obrigatorio>',
-              `O teste Java deve ser criado exatamente em "${javaTestCreationTarget}".`,
-              'O arquivo Java de origem já está no contexto. Use o teste-exemplo citado como padrão quando ele estiver disponível no contexto.',
-              'Não chame get_active_file para redescobrir o arquivo de origem.',
-              '</destino_criacao_obrigatorio>'
-            ].join('\n')
-          : '';
-      const taskEnvelope = [
+      let creationTargetEnvelope = creationTargetInstruction(
+        rootCreationTarget,
+        javaTestCreationTarget,
+        javaUnitTestTask
+      );
+      let taskEnvelope = [
         creationTargetEnvelope,
         `<tarefa_usuario>\n${text}\n</tarefa_usuario>`
       ].filter(Boolean).join('\n\n');
@@ -781,13 +780,16 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         systemPromptChars: agentSystem.length,
         taskChars: taskEnvelope.length,
         modelFileSizeBytes,
-        minimumOutputTokens
+        minimumOutputTokens,
+        compactCodeInput: compactAgentContext || javaUnitTestTask
       });
       const contextStartedAt = Date.now();
       const effectiveMaxFiles = taskContextEstimate.complexity === 'simple'
-        ? genericFileCreationTask && !rootCreationTarget
-          ? Math.min(3, budget.maxFiles)
-          : 1
+        ? javaUnitTestTask
+          ? Math.min(2, budget.maxFiles)
+          : genericFileCreationTask && !rootCreationTarget
+            ? Math.min(3, budget.maxFiles)
+            : 1
         : budget.maxFiles;
 
       s.logger.info(
@@ -800,11 +802,12 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
           `limiteTotal=${budget.workspaceChars}`,
           `saídaReservada=${budget.maxOutputTokens} tokens`,
           `mínimoTarefa=${minimumOutputTokens || 'padrão'} tokens`,
-          `margem=${budget.safetyTokens} tokens`
+          `margem=${budget.safetyTokens} tokens`,
+          `continuaçãoReservada=${budget.continuationTokens} tokens`
         ].join(' ')
       );
 
-      const workspaceContext = await buildAgentWorkspaceContext({
+      let workspaceContext = await buildAgentWorkspaceContext({
         workspaceRoot,
         priority: contextPriority,
         request: text,
@@ -813,6 +816,27 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         maxTotalChars: budget.workspaceChars,
         includeTestRelated: genericFileCreationTask && !rootCreationTarget
       });
+
+      // Depois que as referências Java foram realmente resolvidas, conseguimos
+      // derivar "mesmo pacote" com segurança a partir do teste-exemplo citado.
+      if (!javaTestCreationTarget && javaUnitTestTask) {
+        javaTestCreationTarget = javaUnitTestCreationTarget(
+          text,
+          contextPriority,
+          workspaceContext.files.map(file => file.filePath)
+        );
+        if (javaTestCreationTarget) {
+          creationTargetEnvelope = creationTargetInstruction(
+            rootCreationTarget,
+            javaTestCreationTarget,
+            javaUnitTestTask
+          );
+          taskEnvelope = [
+            creationTargetEnvelope,
+            `<tarefa_usuario>\n${text}\n</tarefa_usuario>`
+          ].filter(Boolean).join('\n\n');
+        }
+      }
 
       const contextCharacters = workspaceContext.files.reduce(
         (total, file) => total + file.content.length,
@@ -827,7 +851,7 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
           `caracteres=${contextCharacters}`
         ].join(' ')
       );
-      const initialPrompt = [
+      let initialPrompt = [
         workspaceContext.text,
         taskEnvelope
       ].filter(Boolean).join('\n\n');
@@ -854,7 +878,65 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         `[Flow][5/6] Iniciando AgentLoop; máximoEtapas=${effectiveAgentSteps}.`
       );
 
-      response = await s.engine.runAgent({
+      let agentToolExecutions = 0;
+      const executeAgentTool = (call: ToolCall) => {
+        agentToolExecutions += 1;
+        const tool = selectedSchemas.find(schema => schema.name === call.name);
+        if (!tool) {
+          const validNames = selectedSchemas.map(schema => schema.name).join(', ');
+          return Promise.resolve({
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: null,
+            error: `Ferramenta "${call.name}" não existe. Ferramentas disponíveis no modo ${mode}: ${validNames}.`,
+            durationMs: 0
+          });
+        }
+        if (call.name === 'create_file' && rootCreationTarget) {
+          const proposedPath = typeof call.arguments.filePath === 'string'
+            ? call.arguments.filePath.replace(/\\/g, '/')
+            : '';
+          if (proposedPath !== rootCreationTarget) {
+            s.logger.info('agent', `[Tool] Destino de create_file normalizado para a raiz: ${rootCreationTarget}.`);
+          }
+          call.arguments.filePath = rootCreationTarget;
+        } else if (call.name === 'create_file' && javaTestCreationTarget) {
+          const proposedPath = typeof call.arguments.filePath === 'string'
+            ? call.arguments.filePath.replace(/\\/g, '/')
+            : '';
+          if (proposedPath !== javaTestCreationTarget) {
+            s.logger.info('agent', `[Tool] Destino do teste Java normalizado: ${javaTestCreationTarget}.`);
+          }
+          call.arguments.filePath = javaTestCreationTarget;
+        }
+        if (call.name === 'create_file') {
+          const contentIssue = generatedFileContentIssue(
+            call.arguments.filePath,
+            call.arguments.content,
+            { request: text, sources: workspaceContext.files }
+          );
+          if (contentIssue) {
+            s.logger.warn('agent', `[Tool] create_file rejeitado: ${contentIssue}`);
+            return Promise.resolve({
+              callId: call.id,
+              name: call.name,
+              ok: false,
+              content: null,
+              error: contentIssue,
+              durationMs: 0
+            });
+          }
+        }
+        const validationError = validateToolArguments(tool, call.arguments);
+        if (validationError) {
+          s.logger.warn('agent', `[Tool] Argumentos rejeitados para ${call.name}: ${validationError}`);
+          return Promise.resolve({ callId: call.id, name: call.name, ok: false, content: null, error: validationError, durationMs: 0 });
+        }
+        return s.tools.execute(call);
+      };
+
+      const runAgentOnce = () => s.engine.runAgent({
         initialPrompt,
         taskReminder: taskEnvelope,
         systemPrompt: agentSystem,
@@ -862,62 +944,58 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         diagnosticMode: vscode.workspace.getConfiguration('offgrid').get<boolean>('diagnosticMode', false),
         maxTokens: budget.maxOutputTokens,
         signal: controller.signal,
-        executeTool: call => {
-          const tool = selectedSchemas.find(schema => schema.name === call.name);
-          if (!tool) {
-            const validNames = selectedSchemas.map(schema => schema.name).join(', ');
-            return Promise.resolve({
-              callId: call.id,
-              name: call.name,
-              ok: false,
-              content: null,
-              error: `Ferramenta "${call.name}" não existe. Ferramentas disponíveis no modo ${mode}: ${validNames}.`,
-              durationMs: 0
-            });
-          }
-          if (call.name === 'create_file' && rootCreationTarget) {
-            const proposedPath = typeof call.arguments.filePath === 'string'
-              ? call.arguments.filePath.replace(/\\/g, '/')
-              : '';
-            if (proposedPath !== rootCreationTarget) {
-              s.logger.info('agent', `[Tool] Destino de create_file normalizado para a raiz: ${rootCreationTarget}.`);
-            }
-            call.arguments.filePath = rootCreationTarget;
-          } else if (call.name === 'create_file' && javaTestCreationTarget) {
-            const proposedPath = typeof call.arguments.filePath === 'string'
-              ? call.arguments.filePath.replace(/\\/g, '/')
-              : '';
-            if (proposedPath !== javaTestCreationTarget) {
-              s.logger.info('agent', `[Tool] Destino do teste Java normalizado: ${javaTestCreationTarget}.`);
-            }
-            call.arguments.filePath = javaTestCreationTarget;
-          }
-          if (call.name === 'create_file') {
-            const contentIssue = generatedFileContentIssue(
-              call.arguments.filePath,
-              call.arguments.content,
-              { request: text, sources: workspaceContext.files }
-            );
-            if (contentIssue) {
-              s.logger.warn('agent', `[Tool] create_file rejeitado: ${contentIssue}`);
-              return Promise.resolve({
-                callId: call.id,
-                name: call.name,
-                ok: false,
-                content: null,
-                error: contentIssue,
-                durationMs: 0
-              });
-            }
-          }
-          const validationError = validateToolArguments(tool, call.arguments);
-          if (validationError) {
-            s.logger.warn('agent', `[Tool] Argumentos rejeitados para ${call.name}: ${validationError}`);
-            return Promise.resolve({ callId: call.id, name: call.name, ok: false, content: null, error: validationError, durationMs: 0 });
-          }
-          return s.tools.execute(call);
-        }
+        executeTool: executeAgentTool
       });
+
+      try {
+        response = await runAgentOnce();
+      } catch (error) {
+        // Última barreira para fallback 4K: se a estimativa do tokenizer real
+        // ainda for mais densa que nosso orçamento e nenhuma ferramenta tiver
+        // sido executada, compacte origem + referência e tente uma única vez.
+        // Nunca repetimos depois de side effects/propostas de alteração.
+        if (
+          contextSize <= 4_096
+          && agentToolExecutions === 0
+          && isAgentContextWindowError(error)
+          && workspaceContext.files.length > 0
+        ) {
+          s.logger.warn(
+            'agent',
+            '[Context] Prompt ainda excedeu 4K; aplicando compactação de emergência e repetindo uma única vez.'
+          );
+          workspaceContext = await buildAgentWorkspaceContext({
+            workspaceRoot,
+            priority: contextPriority,
+            request: text,
+            maxFiles: javaUnitTestTask ? 2 : Math.min(2, effectiveMaxFiles),
+            maxCharsPerFile: 900,
+            maxTotalChars: javaUnitTestTask ? 1_800 : 1_500,
+            includeTestRelated: genericFileCreationTask && !rootCreationTarget
+          });
+          if (!javaTestCreationTarget && javaUnitTestTask) {
+            javaTestCreationTarget = javaUnitTestCreationTarget(
+              text,
+              contextPriority,
+              workspaceContext.files.map(file => file.filePath)
+            );
+          }
+          creationTargetEnvelope = creationTargetInstruction(
+            rootCreationTarget,
+            javaTestCreationTarget,
+            javaUnitTestTask
+          );
+          taskEnvelope = [
+            creationTargetEnvelope,
+            `<tarefa_usuario>\n${text}\n</tarefa_usuario>`
+          ].filter(Boolean).join('\n\n');
+          initialPrompt = [workspaceContext.text, taskEnvelope].filter(Boolean).join('\n\n');
+          agentToolExecutions = 0;
+          response = await runAgentOnce();
+        } else {
+          throw error;
+        }
+      }
       s.logger.info(
         'agent',
         [
@@ -1202,6 +1280,13 @@ async function ensureAutomaticContextForTask(
 
 function parseContextMode(value: unknown): ContextMode {
   return value === 'manual' ? 'manual' : 'automatic';
+}
+
+function isAgentContextWindowError(error: unknown): boolean {
+  const candidate = error as { name?: unknown; message?: unknown };
+  if (candidate?.name === 'ContextWindowError') return true;
+  const text = typeof candidate?.message === 'string' ? candidate.message : String(error);
+  return /(?:prompt|histórico).*excede.*janela de contexto|entradaEstimada=/i.test(text);
 }
 
 function isContextCapacityError(error: unknown): boolean {
@@ -1507,13 +1592,47 @@ async function buildChatPrompt(s: Services, text: string): Promise<string> {
   return [temporal, ...snippets, question].filter(Boolean).join('\n\n');
 }
 
+function creationTargetInstruction(
+  rootCreationTarget: string | undefined,
+  javaTestCreationTarget: string | undefined,
+  javaUnitTestTask: boolean
+): string {
+  if (rootCreationTarget) {
+    return [
+      '<destino_criacao_obrigatorio>',
+      `Crie exatamente o arquivo "${rootCreationTarget}" na raiz do workspace.`,
+      'Não escolha subpasta e não use o arquivo ativo como destino ou contexto.',
+      '</destino_criacao_obrigatorio>'
+    ].join('\n');
+  }
+  if (javaTestCreationTarget) {
+    return [
+      '<destino_criacao_obrigatorio>',
+      `O teste Java deve ser criado exatamente em "${javaTestCreationTarget}".`,
+      'A classe de origem e o teste-exemplo já estão no contexto; siga o padrão existente.',
+      'Não chame get_active_file para redescobrir a origem.',
+      '</destino_criacao_obrigatorio>'
+    ].join('\n');
+  }
+  if (javaUnitTestTask) {
+    return [
+      '<destino_criacao_obrigatorio>',
+      'Crie o novo teste Java no mesmo pacote do teste-exemplo citado pelo usuário.',
+      'A classe de origem já está no contexto; não chame get_active_file.',
+      '</destino_criacao_obrigatorio>'
+    ].join('\n');
+  }
+  return '';
+}
+
 async function buildAgentSystemPrompt(
   s: Services,
   schemas: ReturnType<typeof schemasForMode>,
   mode: ConversationMode,
   prompt: string,
   modelTier: 'small' | 'medium' | 'large' = 'large',
-  priorityOverride?: string[]
+  priorityOverride?: string[],
+  compact = false
 ): Promise<string> {
   const priority = priorityOverride ?? s.contextManager.priority(prompt);
   const taskGuidance = fullStackFlowTaskGuidance(prompt) ?? frontendCrudTaskGuidance(prompt) ?? serviceTaskGuidance(prompt) ?? endpointTaskGuidance(prompt);
@@ -1522,9 +1641,11 @@ async function buildAgentSystemPrompt(
   // Modelos small (0.5B–1B) recebem prompt ultra-compacto: sem prosa,
   // só o essencial para o modelo entender o protocolo de ferramentas.
   // Modelos medium/large recebem o prompt completo com contexto rico.
-  if (modelTier === 'small') {
+  if (modelTier === 'small' || compact) {
     return [
-      'Agente Offgrid. Use ferramentas; não invente caminhos ou conteúdo.',
+      compact
+        ? 'Agente Offgrid em contexto compacto. Use o contexto recebido e ferramentas; não invente caminhos ou conteúdo.'
+        : 'Agente Offgrid. Use ferramentas; não invente caminhos ou conteúdo.',
       'Ferramenta: responda apenas JSON {"name":"nome","arguments":{...}}; sem Markdown.',
       'Só existem as ferramentas listadas abaixo. Nunca invente nomes de ferramenta.',
       'Leia antes de editar. Finalize com apply_changes; nunca grave direto.',
@@ -1573,102 +1694,6 @@ function compactToolSignature(
     .join(',');
 
   return `${tool.name}(${argumentsText})`;
-}
-
-// Calibração por tamanho do modelo (proxy via fileSize do GGUF Q4):
-//   small  < 0,7 GB  → modelos ultracompactos
-//   medium 0,7–3 GB  → 3B e 4B → prompt completo e contexto moderado
-//   large  > 3 GB    → 7B+     → contexto mais generoso quando houver memória
-function detectModelTier(modelFileSizeBytes: number): 'small' | 'medium' | 'large' {
-  const GB = 1024 ** 3;
-  // Limiares por tamanho do GGUF Q4:
-  //   small  < 0.7 GB → modelos ultracompactos
-  //   medium 0.7–3 GB → 3B e 4B Q4 → prompt completo
-  //   large  > 3 GB   → 7B+
-  return modelFileSizeBytes > 3 * GB ? 'large'
-    : modelFileSizeBytes > 0.7 * GB ? 'medium'
-      : 'small';
-}
-
-function calculateAgentContextBudget(params: {
-  contextSize: number;
-  configuredMaxTokens: number;
-  systemPromptChars: number;
-  taskChars: number;
-  modelFileSizeBytes: number;
-  minimumOutputTokens?: number;
-}): {
-  maxOutputTokens: number;
-  safetyTokens: number;
-  workspaceChars: number;
-  maxFiles: number;
-  maxCharsPerFile: number;
-  modelTier: 'small' | 'medium' | 'large';
-} {
-  const contextSize = Math.max(256, Math.floor(params.contextSize));
-  const configuredMaxTokens = Math.max(64, Math.floor(params.configuredMaxTokens));
-  const minimumOutputTokens = Math.max(0, Math.floor(params.minimumOutputTokens ?? 0));
-  const standardOutputCap = Math.max(96, Math.floor(contextSize * 0.16));
-  const extendedOutputCap = Math.max(standardOutputCap, Math.floor(contextSize * 0.25));
-  const outputCap = minimumOutputTokens > standardOutputCap
-    ? extendedOutputCap
-    : standardOutputCap;
-  const maxOutputTokens = Math.min(
-    Math.max(configuredMaxTokens, minimumOutputTokens),
-    outputCap
-  );
-  const safetyTokens = Math.max(64, Math.floor(contextSize * 0.06));
-  const availableInputTokens = Math.max(
-    0,
-    contextSize - maxOutputTokens - safetyTokens
-  );
-
-  // Código, caminhos e português costumam consumir mais tokens que prosa
-  // inglesa. Três caracteres por token é uma estimativa conservadora.
-  const availableInputChars = availableInputTokens * 3;
-  const fixedOverheadChars = 384;
-  const workspaceChars = Math.max(
-    128,
-    availableInputChars
-      - params.systemPromptChars
-      - params.taskChars
-      - fixedOverheadChars
-  );
-
-  const modelTier = detectModelTier(params.modelFileSizeBytes);
-
-  const tierMaxFiles =
-    modelTier === 'large' ? 8
-      : modelTier === 'medium' ? 4
-        : 1;
-
-  const tierMaxCharsPerFile =
-    modelTier === 'large' ? 6_000
-      : modelTier === 'medium' ? 3_000
-        : 1_500;
-
-  const maxFiles = Math.min(
-    tierMaxFiles,
-    workspaceChars >= 8_000 ? 8
-      : workspaceChars >= 4_000 ? 5
-        : workspaceChars >= 1_800 ? 3
-          : workspaceChars >= 700 ? 2
-            : 1
-  );
-
-  const maxCharsPerFile = Math.max(
-    128,
-    Math.min(tierMaxCharsPerFile, Math.floor(workspaceChars / maxFiles))
-  );
-
-  return {
-    maxOutputTokens,
-    safetyTokens,
-    workspaceChars,
-    maxFiles,
-    maxCharsPerFile,
-    modelTier
-  };
 }
 
 async function copyDiagnostics(s: Services): Promise<void> {

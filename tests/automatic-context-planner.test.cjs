@@ -176,7 +176,7 @@ test('criação genérica não oferece get_active_file quando já há contexto p
 
 test('tarefa simples limita o contexto automático do workspace a um arquivo', () => {
   const extension = fs.readFileSync(path.join(root, 'src', 'extension.ts'), 'utf8');
-  assert.match(extension, /taskContextEstimate\.complexity === 'simple'[\s\S]*?genericFileCreationTask[\s\S]*?Math\.min\(3, budget\.maxFiles\)[\s\S]*?: 1[\s\S]*?: budget\.maxFiles/);
+  assert.match(extension, /taskContextEstimate\.complexity === 'simple'[\s\S]*?javaUnitTestTask[\s\S]*?Math\.min\(2, budget\.maxFiles\)[\s\S]*?Math\.min\(3, budget\.maxFiles\)[\s\S]*?: budget\.maxFiles/);
   assert.match(extension, /maxFiles: effectiveMaxFiles/);
 });
 
