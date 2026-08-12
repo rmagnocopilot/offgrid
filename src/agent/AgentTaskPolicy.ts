@@ -132,8 +132,11 @@ export function javaUnitTestCreationTarget(
 }
 
 export function agentOutputTokenFloor(request: string): number {
-  // 768 força o orçamento estendido (até 25% da janela), permitindo gerar um
-  // arquivo de teste completo em 4K sem reintroduzir o antigo corte de 256.
+  // Testes Java de DTO costumam carregar dezenas de métodos dentro de create_file.
+  // Em 4K, 1024 tokens truncavam o JSON no meio do conteúdo e o retry repetia
+  // a mesma falha. Reserve 2048 tokens para esse caso e mantenha 768 para
+  // criações menores. O motor ainda reduz o valor se o tokenizer real exigir.
+  if (isJavaUnitTestCreationTask(request)) return 2_048;
   return isFileCreationTask(request) ? 768 : 0;
 }
 
@@ -173,6 +176,9 @@ export function generatedFileContentIssue(
 
     if (!/@Test\b/.test(content)) {
       return 'O arquivo Java de teste não contém nenhum método anotado com @Test.';
+    }
+    if (!/\bclass\s+[A-Za-z_$][\w$]*Test\b/.test(content) || !content.trimEnd().endsWith('}')) {
+      return 'O arquivo Java de teste parece incompleto ou truncado antes do fechamento da classe.';
     }
     return undefined;
   }

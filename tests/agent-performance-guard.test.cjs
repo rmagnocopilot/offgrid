@@ -66,5 +66,27 @@ test('fallback 4K reserva continuação e possui compactação de emergência', 
   assert.match(budget, /continuationTokens/);
   assert.match(budget, /contextSize <= 4_096/);
   assert.match(extension, /Prompt ainda excedeu 4K; aplicando compactação de emergência/);
-  assert.match(extension, /agentToolExecutions === 0/);
+  assert.match(extension, /agentWriteExecutions === 0/);
+  assert.match(extension, /result\.ok && tool\.write/);
+});
+
+
+test('continuações de ferramenta possuem orçamento próprio e Java evita list_files', async () => {
+  const loop = await source('src/agent/AgentLoop.ts');
+  const extension = await source('src/extension.ts');
+  assert.match(loop, /continuationPromptMaxChars/);
+  assert.match(loop, /serializeToolResultForPrompt/);
+  assert.match(extension, /const javaUnitTestTools = new Set/);
+  assert.match(extension, /'read_file'[\s\S]*'create_file'[\s\S]*'apply_changes'/);
+  const javaToolsBlock = extension.match(/const javaUnitTestTools = new Set\(\[([\s\S]*?)\]\);/)?.[1] ?? '';
+  assert.doesNotMatch(javaToolsBlock, /list_files/);
+});
+
+test('perfil GPU exige folga pós-carga antes de ser persistido', async () => {
+  const client = await source('src/engine/EngineClient.ts');
+  const hardware = await source('src/diagnostics/HardwareProfile.ts');
+  assert.match(client, /minimumPostLoadGpuFreeBytes/);
+  assert.match(client, /Tentando um perfil com menos camadas/);
+  assert.match(hardware, /PROFILE_STRATEGY_VERSION = 2/);
+  assert.match(hardware, /reserva .*GB/);
 });

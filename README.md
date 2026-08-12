@@ -2,21 +2,24 @@
   <img src="resources/branding/offgrid-logo.png" alt="Offgrid" width="260">
 </p>
 
-# Offgrid 2.0.7
+# Offgrid 2.0.8
 
 Assistente local e offline para Visual Studio Code, reescrito em **TypeScript**. A arquitetura segue a separação usada pelo Unplugged entre Agente, ferramentas, contexto, segurança, motor LLM e interface, preservando os recursos adicionais construídos no Offgrid.
 
-## Novidades da versão 2.0.7
+## Novidades da versão 2.0.8
 
-- corrige o Modo Agente quando o Qwen3 4B precisa operar em **4096 tokens** por limitação de memória: o prompt inicial passa a reservar espaço para a continuação do AgentLoop em vez de ocupar toda a janela logo no primeiro passo;
-- em fallback 4K, usa prompt de sistema compacto e limita `AGENTS.md` para preservar espaço para o código realmente necessário;
-- geração de teste Java prioriza exatamente **classe de origem + teste-exemplo citado**, mesmo quando o ContextManager encontrou arquivos secundários;
-- pedidos como “crie os testes unitários ... no mesmo pacote de `AcompanhamentoObrasHistoricoDTOTest`” agora derivam automaticamente o caminho do novo `*Test.java` a partir do teste de referência;
-- arquivos Java truncados preservam início e fim, mantendo imports/campos e também métodos finais como `equals`, `hashCode` ou os últimos casos de teste;
-- criação de arquivos reserva até **1024 tokens de saída em contexto 4K**, sem reintroduzir o antigo limite artificial de 256 tokens;
-- se o tokenizer real ainda considerar o prompt grande demais em 4K, o Agente executa **uma única compactação de emergência**, somente antes de qualquer ferramenta ter sido executada, evitando duplicar alterações;
-- Qwen3 4B continua preferindo 8K automaticamente quando houver memória suficiente e pode cair para 4K de forma funcional quando a máquina estiver mais pressionada;
-- mantém as melhorias da 2.0.6: fallback embarcado `node-llama-cpp`, logs de produção mais limpos, interface Chat/Planejar/Agente e robustez de revisão/rollback.
+- adiciona o **Adaptive Fast Path**: antes de iniciar o AgentLoop, o Offgrid analisa deterministicamente a estrutura do projeto, módulo, linguagem, build, source/test roots, framework e arquivo de referência citado pelo usuário;
+- pedidos guiados por padrão, como “crie os testes desta classe seguindo `AcompanhamentoObrasHistoricoDTOTest`”, passam a extrair o padrão real do workspace e inferir destino, pacote e nomenclatura sem depender da navegação do modelo;
+- padrões mecânicos de alta confiança podem ser **sintetizados localmente em TypeScript**, sem chamar o LLM. O caso de DTO Java com getters/setters e teste de referência é tratado dessa forma, eliminando a geração de vários minutos observada no Qwen3 4B;
+- quando interpretação semântica ainda é necessária, o Adaptive Fast Path usa uma **geração direta compacta**: o modelo devolve somente o conteúdo do arquivo. O TypeScript monta `create_file` internamente, evitando transportar milhares de caracteres dentro de JSON de ferramenta;
+- o perfil do projeto é cacheado em memória e invalidado quando os manifests relevantes mudam, reduzindo varreduras repetidas do workspace;
+- referências Java de teste preservam corpos reais de métodos `@Test` durante a compactação, permitindo aprender estilo e convenções sem enviar o arquivo inteiro ao modelo;
+- o caminho genérico também suporta criação por referência explícita, por exemplo `PedidoService.java` seguindo `ClienteService.java`, quando destino e localização podem ser inferidos com alta confiança;
+- se a síntese local ou a geração direta produzir conteúdo incompleto, com pacote incorreto ou chaves desbalanceadas, nenhuma escrita é preparada;
+- o AgentLoop tradicional continua disponível como fallback para tarefas sem padrão estrutural confiável;
+- mantém a proteção de contexto 4K, orçamento de resultados de ferramentas, detecção de `create_file` truncado e recuperação segura após operações somente de leitura;
+- mantém perfil Vulkan rápido quando a carga deixa VRAM saudável e reduz camadas automaticamente apenas quando necessário;
+- mantém as melhorias anteriores: fallback embarcado `node-llama-cpp`, logs de produção mais limpos, interface Chat/Planejar/Agente e revisão/rollback de alterações.
 
 ## Abrir o Offgrid
 
@@ -118,7 +121,7 @@ npm run package
 Arquivo esperado:
 
 ```text
-offgrid-2.0.7.vsix
+offgrid-2.0.8.vsix
 ```
 
 Os modelos em `globalStorage/rmagnocopilot.offgrid/models` permanecem após a atualização do VSIX.

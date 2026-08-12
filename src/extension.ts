@@ -27,6 +27,7 @@ import { tryPrepareStructuralEditFastPath } from './agent/StructuralEditFastPath
 import { tryPrepareDocumentationFastPath } from './agent/DocumentationFastPath';
 import { tryPrepareTestGenerationFastPath } from './agent/TestGenerationFastPath';
 import { tryPrepareJavaUnitTestFastPath } from './agent/JavaUnitTestFastPath';
+import { tryPrepareAdaptivePatternFastPath } from './agent/AdaptivePatternFastPath';
 import { tryPrepareBackendEndpointFastPath } from './agent/BackendEndpointFastPath';
 import { tryPrepareBackendServiceFastPath } from './agent/BackendServiceFastPath';
 import { tryPrepareFrontendCrudFastPath } from './agent/FrontendCrudFastPath';
@@ -414,6 +415,14 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         'create_file',
         'apply_changes'
       ]);
+      // Testes Java já recebem classe-alvo + teste-exemplo pelo contexto
+      // automático. list_files só aumenta o prompt e incentiva navegação
+      // redundante; read_file permanece como fallback pontual.
+      const javaUnitTestTools = new Set([
+        'read_file',
+        'create_file',
+        'apply_changes'
+      ]);
       // Se já existe arquivo prioritário no contexto, get_active_file só faz o
       // modelo gastar uma etapa para descobrir algo que o prompt já informa.
       if (!contextPriority.length) fileCreationTools.add('get_active_file');
@@ -462,9 +471,11 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
           ? allSchemas.filter(schema => backendServiceTools.has(schema.name))
           : backendEndpointAnalysis
             ? allSchemas.filter(schema => backendEndpointTools.has(schema.name))
-            : genericFileCreationTask
-              ? allSchemas.filter(schema => fileCreationTools.has(schema.name))
-              : allSchemas;
+            : javaUnitTestTask
+              ? allSchemas.filter(schema => javaUnitTestTools.has(schema.name))
+              : genericFileCreationTask
+                ? allSchemas.filter(schema => fileCreationTools.has(schema.name))
+                : allSchemas;
       const selectedSchemas = fullStackRelationRefactorAnalysis
         ? allSchemas.filter(schema => fullStackRelationRefactorTools.has(schema.name))
         : fullStackFlowAnalysis
@@ -623,6 +634,28 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
           s.sessions.addMessage({ role: 'assistant', text: response });
           s.sessions.updateMetadata({
             lastError: undefined,
+            backend: s.engine.diagnostics.backend
+          });
+          return;
+        }
+
+        const adaptiveFastPath = await tryPrepareAdaptivePatternFastPath({
+          request: text,
+          workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          priority,
+          contextSize: s.engine.diagnostics.contextSize ?? 4_096,
+          generate: params => s.engine.generateDirect({ ...params, signal: controller.signal }),
+          execute: call => s.tools.execute(call),
+          info: message => s.logger.info('agent', message),
+          warn: message => s.logger.warn('agent', message)
+        });
+
+        if (adaptiveFastPath) {
+          response = adaptiveFastPath.text;
+          await s.view.streamChunk(messageId, response);
+          s.sessions.addMessage({ role: 'assistant', text: response });
+          s.sessions.updateMetadata({
+            lastError: adaptiveFastPath.complete ? undefined : response,
             backend: s.engine.diagnostics.backend
           });
           return;
@@ -878,9 +911,8 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         `[Flow][5/6] Iniciando AgentLoop; máximoEtapas=${effectiveAgentSteps}.`
       );
 
-      let agentToolExecutions = 0;
-      const executeAgentTool = (call: ToolCall) => {
-        agentToolExecutions += 1;
+      let agentWriteExecutions = 0;
+      const executeAgentTool = async (call: ToolCall) => {
         const tool = selectedSchemas.find(schema => schema.name === call.name);
         if (!tool) {
           const validNames = selectedSchemas.map(schema => schema.name).join(', ');
@@ -933,7 +965,12 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
           s.logger.warn('agent', `[Tool] Argumentos rejeitados para ${call.name}: ${validationError}`);
           return Promise.resolve({ callId: call.id, name: call.name, ok: false, content: null, error: validationError, durationMs: 0 });
         }
-        return s.tools.execute(call);
+        const result = await s.tools.execute(call);
+        // Recuperação de contexto pode repetir com segurança depois de
+        // ferramentas somente de leitura. Bloqueamos retry apenas quando uma
+        // escrita realmente foi preparada/aplicada com sucesso.
+        if (result.ok && tool.write) agentWriteExecutions += 1;
+        return result;
       };
 
       const runAgentOnce = () => s.engine.runAgent({
@@ -944,19 +981,20 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         diagnosticMode: vscode.workspace.getConfiguration('offgrid').get<boolean>('diagnosticMode', false),
         maxTokens: budget.maxOutputTokens,
         signal: controller.signal,
-        executeTool: executeAgentTool
+        executeTool: executeAgentTool,
+        continuationPromptMaxChars: Math.max(900, budget.continuationTokens * 2)
       });
 
       try {
         response = await runAgentOnce();
       } catch (error) {
         // Última barreira para fallback 4K: se a estimativa do tokenizer real
-        // ainda for mais densa que nosso orçamento e nenhuma ferramenta tiver
-        // sido executada, compacte origem + referência e tente uma única vez.
-        // Nunca repetimos depois de side effects/propostas de alteração.
+        // ainda for mais densa que nosso orçamento e nenhuma escrita tiver sido
+        // preparada/aplicada, compacte origem + referência e tente uma única vez.
+        // Leituras são idempotentes; nunca repetimos depois de side effects de escrita.
         if (
           contextSize <= 4_096
-          && agentToolExecutions === 0
+          && agentWriteExecutions === 0
           && isAgentContextWindowError(error)
           && workspaceContext.files.length > 0
         ) {
@@ -990,7 +1028,7 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
             `<tarefa_usuario>\n${text}\n</tarefa_usuario>`
           ].filter(Boolean).join('\n\n');
           initialPrompt = [workspaceContext.text, taskEnvelope].filter(Boolean).join('\n\n');
-          agentToolExecutions = 0;
+          agentWriteExecutions = 0;
           response = await runAgentOnce();
         } else {
           throw error;
@@ -1636,6 +1674,10 @@ async function buildAgentSystemPrompt(
 ): Promise<string> {
   const priority = priorityOverride ?? s.contextManager.priority(prompt);
   const taskGuidance = fullStackFlowTaskGuidance(prompt) ?? frontendCrudTaskGuidance(prompt) ?? serviceTaskGuidance(prompt) ?? endpointTaskGuidance(prompt);
+  const javaTestContextReady = isJavaUnitTestCreationTask(prompt) && priority.length > 0;
+  const readBeforeWriteGuidance = javaTestContextReady
+    ? 'A classe-alvo e as referências prioritárias já estão no contexto. Não releia arquivos já fornecidos; use read_file apenas se faltar informação indispensável.'
+    : 'Leia antes de editar.';
   const toolSignatures = schemas.map(compactToolSignature);
 
   // Modelos small (0.5B–1B) recebem prompt ultra-compacto: sem prosa,
@@ -1648,7 +1690,7 @@ async function buildAgentSystemPrompt(
         : 'Agente Offgrid. Use ferramentas; não invente caminhos ou conteúdo.',
       'Ferramenta: responda apenas JSON {"name":"nome","arguments":{...}}; sem Markdown.',
       'Só existem as ferramentas listadas abaixo. Nunca invente nomes de ferramenta.',
-      'Leia antes de editar. Finalize com apply_changes; nunca grave direto.',
+      `${readBeforeWriteGuidance} Finalize com apply_changes; nunca grave direto.`,
       'Ao criar arquivos, gere conteúdo completo; nunca use TODO, FIXME ou comentários de implementação pendente.',
       'Em create_file, content deve ser uma string JSON válida; escape quebras de linha e nunca use template literals com crases.',
       taskGuidance,
@@ -1664,7 +1706,7 @@ async function buildAgentSystemPrompt(
     `Ordem de contexto: ${priority.join(' → ') || 'nenhum arquivo explícito'}.`,
     taskGuidance,
     'Para chamar ferramenta, responda somente JSON: {"name":"nome","arguments":{...}}. Sem Markdown ou explicação.',
-    'Leia antes de editar; altere só o necessário; finalize com apply_changes; nunca grave direto.',
+    `${readBeforeWriteGuidance} Altere só o necessário; finalize com apply_changes; nunca grave direto.`,
     'Ao criar arquivos, gere conteúdo completo; nunca use TODO, FIXME ou comentários de implementação pendente.',
       'Em create_file, content deve ser uma string JSON válida; escape quebras de linha e nunca use template literals com crases.',
     s.autonomy === 'assisted'

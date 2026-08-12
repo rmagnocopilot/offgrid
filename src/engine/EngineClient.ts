@@ -1,4 +1,4 @@
-import * as path from 'node:path';
+﻿import * as path from 'node:path';
 import { fork, type ChildProcess } from 'node:child_process';
 import type {
   EngineDiagnostics, EngineLoadOptions, EngineRequestMethod, EngineResult, EngineErrorMessage,
@@ -6,7 +6,7 @@ import type {
 } from '../types/contracts';
 import { AgentLoop } from '../agent/AgentLoop';
 import { ResourceMonitor } from '../diagnostics/ResourceMonitor';
-import { chooseLoadAttempts, HardwareProfileStore } from '../diagnostics/HardwareProfile';
+import { chooseLoadAttempts, HardwareProfileStore, minimumPostLoadGpuFreeBytes } from '../diagnostics/HardwareProfile';
 import type { FileLogger } from '../diagnostics/FileLogger';
 import { isDeviceMemoryError } from '../llm/LlamaServerEngine';
 import { LlamaServerManager, llamaServerExecutablePath } from '../llm/LlamaServerManager';
@@ -99,9 +99,28 @@ export class EngineClient {
             workerPid: this.worker?.pid ?? result.workerPid,
             lastFallback: index ? { from: attempts[0], to: attempt } : null
           };
-          await this.profiles.recordSuccess(options.modelPath, options.contextSize, attempt);
           this.state.resources = await this.refreshResources(true, false);
           this.logResources('depois de carregar', this.state.resources);
+
+          const loadedGpu = this.state.resources.gpus[0];
+          if (this.state.backend !== 'cpu' && loadedGpu) {
+            const minimumFree = minimumPostLoadGpuFreeBytes(loadedGpu.totalBytes, options.contextSize);
+            if (loadedGpu.freeBytes < minimumFree) {
+              const freeGb = loadedGpu.freeBytes / 1024 ** 3;
+              const minimumGb = minimumFree / 1024 ** 3;
+              lastError = new Error(
+                `Perfil GPU carregou, mas deixou pouca VRAM livre: ${freeGb.toFixed(2)} GB; mínimo saudável=${minimumGb.toFixed(2)} GB.`
+              );
+              this.logger.warn(
+                'model',
+                `[Load] ${(lastError instanceof Error ? lastError.message : String(lastError))} Tentando um perfil com menos camadas.`
+              );
+              await this.rpc('unload', {}, { timeoutMs: 30_000 }).catch(() => undefined);
+              continue;
+            }
+          }
+
+          await this.profiles.recordSuccess(options.modelPath, options.contextSize, attempt);
           return this.diagnostics;
         } catch (error) {
           lastError = error;
@@ -137,6 +156,47 @@ export class EngineClient {
     }
   }
 
+  async generateDirect(params: {
+    systemPrompt: string;
+    prompt: string;
+    maxTokens: number;
+    signal?: AbortSignal;
+  }): Promise<string> {
+    this.busyOperation = 'agent';
+    let started = false;
+    const startedAt = Date.now();
+    try {
+      this.logger.info(
+        'agent',
+        `[AdaptiveFastPath] Iniciando geração direta. prompt=${params.prompt.length} caracteres maxTokens=${params.maxTokens}.`
+      );
+      await this.rpc('agentStart', { systemPrompt: params.systemPrompt }, { signal: params.signal });
+      started = true;
+      const response = await this.rpc<string>('agentStep', {
+        text: params.prompt,
+        options: {
+          firstStep: true,
+          systemPrompt: params.systemPrompt,
+          maxTokens: params.maxTokens
+        }
+      }, { signal: params.signal });
+      this.logger.info(
+        'agent',
+        `[AdaptiveFastPath] Geração direta concluída em ${Date.now() - startedAt} ms; resposta=${response.length} caracteres.`
+      );
+      return response;
+    } finally {
+      if (started && params.signal?.aborted) {
+        this.logger.warn('agent', '[AdaptiveFastPath] Geração direta cancelada; reiniciando processo isolado.');
+        await this.restart();
+      } else if (started) {
+        await this.rpc('agentFinish', {}, { timeoutMs: 15_000, signal: params.signal })
+          .catch(error => this.logger.warn('agent', '[AdaptiveFastPath] Falha ao restaurar sessão após geração direta.', error));
+      }
+      this.busyOperation = undefined;
+    }
+  }
+
   async runAgent(params: {
     initialPrompt: string;
     taskReminder?: string;
@@ -146,6 +206,7 @@ export class EngineClient {
     maxTokens?: number;
     signal?: AbortSignal;
     executeTool: (call: ToolCall) => Promise<ToolResult>;
+    continuationPromptMaxChars?: number;
   }): Promise<string> {
     this.busyOperation = 'agent';
     let started = false;
@@ -173,6 +234,7 @@ export class EngineClient {
         signal: params.signal,
         log: (level, message) => this.logger.log(level, 'agent', message),
         executeTool: params.executeTool,
+        continuationPromptMaxChars: params.continuationPromptMaxChars,
         invokeStep: async (prompt, step) => {
           const stepStartedAt = Date.now();
           // Chamadas de escrita carregam o conteúdo completo do arquivo dentro do

@@ -339,6 +339,26 @@ function deduplicateCalls(calls: ToolCall[]): ToolCall[] {
   return unique;
 }
 
+
+export function looksLikeTruncatedCreateFileCall(text: string): boolean {
+  const raw = stripFence(text);
+  const nameMatch = /"name"\s*:\s*"create_file"/i.exec(raw);
+  if (!nameMatch) return false;
+
+  const from = (nameMatch.index ?? 0) + nameMatch[0].length;
+  const filePath = looseProperty(raw, 'filePath', from);
+  if (!filePath) return false;
+
+  const contentExpression = /"content"\s*:\s*/g;
+  contentExpression.lastIndex = filePath.end;
+  const contentMatch = contentExpression.exec(raw);
+  if (!contentMatch) return false;
+
+  // Se a string de content não possui fechamento válido até o fim da resposta,
+  // a causa mais provável em create_file longo é corte por maxTokens.
+  return readLooseString(raw, contentExpression.lastIndex, false) === undefined;
+}
+
 export function detectToolCalls(text: string): ToolCall[] {
   const raw = stripFence(text);
   const calls: ToolCall[] = [

@@ -15,7 +15,7 @@ const { javaUnitTestCreationTarget } = require('../out/agent/AgentTaskPolicy');
 const { detectToolCall, detectToolCalls, looksLikeToolCall, looksLikeToolSchema } = require('../out/agent/ToolCallParser');
 const { AgentLoop } = require('../out/agent/AgentLoop');
 const { normalizeRelativePath, isWriteProtectedPath, resolveInsideRoot } = require('../out/safety/PathSafety');
-const { chooseLoadAttempts, HardwareProfileStore } = require('../out/diagnostics/HardwareProfile');
+const { chooseLoadAttempts, HardwareProfileStore, minimumPostLoadGpuFreeBytes } = require('../out/diagnostics/HardwareProfile');
 const { SessionStore } = require('../out/sessions/SessionStore');
 const { FileLogger } = require('../out/diagnostics/FileLogger');
 const { isDeviceMemoryError } = require('../out/llm/LlamaServerEngine');
@@ -273,16 +273,28 @@ test('VRAM disponível gera camadas progressivas', () => {
   const attempts = chooseLoadAttempts(loadOptions, resources([{ name:'GPU', totalBytes:4*1024**3, usedBytes:2*1024**3, freeBytes:2*1024**3, dedicated:true, source:'nvidia-smi' }]));
   assert.equal(attempts[0].gpu, 'vulkan'); assert.ok(attempts.some(x => x.gpuLayers === 1)); assert.equal(attempts.at(-1).gpu, 'cpu');
 });
-test('Qwen3 4B em 8192 tenta mais GPU e mantém fallback conservador', () => {
+test('Qwen3 4B em GPU de 4 GB tenta 4K rápido e mantém fallbacks conservadores', () => {
   const free = 3.8 * 1024 ** 3;
-  const attempts = chooseLoadAttempts(
+  const attempts4k = chooseLoadAttempts(
+    { ...loadOptions, modelPath: 'qwen3-4b-q4_k_m.gguf', contextSize: 4096 },
+    resources([{ name:'GPU', totalBytes:4*1024**3, usedBytes:0.2*1024**3, freeBytes:free, dedicated:true, source:'nvidia-smi' }])
+  );
+  const layers4k = attempts4k.filter(item => item.gpu === 'vulkan').map(item => item.gpuLayers);
+  assert.equal(layers4k[0], 34);
+  assert.ok(layers4k.some(value => typeof value === 'number' && value <= 24));
+
+  const attempts8k = chooseLoadAttempts(
     { ...loadOptions, modelPath: 'qwen3-4b-q4_k_m.gguf', contextSize: 8192 },
     resources([{ name:'GPU', totalBytes:4*1024**3, usedBytes:0.2*1024**3, freeBytes:free, dedicated:true, source:'nvidia-smi' }])
   );
-  const vulkanLayers = attempts.filter(item => item.gpu === 'vulkan').map(item => item.gpuLayers);
-  assert.ok(vulkanLayers[0] > Math.floor(3.8 * 8));
-  assert.ok(vulkanLayers.includes(Math.floor(3.8 * 8)));
-  assert.equal(attempts.at(-1).gpu, 'cpu');
+  const layers8k = attempts8k.filter(item => item.gpu === 'vulkan').map(item => item.gpuLayers);
+  assert.ok(layers8k[0] <= 24, `camadas 8K agressivas demais: ${layers8k[0]}`);
+  assert.equal(attempts8k.at(-1).gpu, 'cpu');
+});
+
+test('GPU de 4 GB exige folga pós-carga maior que 0,91 GB', () => {
+  const minimum = minimumPostLoadGpuFreeBytes(4 * 1024 ** 3, 4096);
+  assert.ok(minimum > 0.91 * 1024 ** 3);
 });
 
 test('perfil funcional persiste por máquina e modelo', async () => {
@@ -307,6 +319,22 @@ test('perfil antigo ou inválido não quebra o carregamento', async () => {
   assert.equal(store.get('C:/models/a.gguf', 4096), undefined);
   await store.recordSuccess('C:/models/a.gguf', 4096, { gpu:'cpu', gpuLayers:0, reason:'ok' });
   assert.equal(store.get('C:/models/a.gguf', 4096).gpu, 'cpu');
+});
+
+
+test('perfil da estratégia anterior é invalidado', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'offgrid-profile-strategy-'));
+  const file = path.join(dir, 'hardware-profiles.json');
+  await fsp.writeFile(file, JSON.stringify([{
+    modelKey: 'qwen3-4b-q4_k_m.gguf',
+    machineKey: `${process.platform}:${process.arch}:${os.hostname()}:${Math.round(os.totalmem() / 1024 ** 3)}`,
+    contextSize: 4096,
+    attempt: { gpu:'vulkan', gpuLayers:34, reason:'perfil antigo' },
+    updatedAt: new Date().toISOString()
+  }]), 'utf8');
+  const restored = new HardwareProfileStore(dir);
+  await restored.init();
+  assert.equal(restored.get('C:/models/qwen3-4b-q4_k_m.gguf', 4096), undefined);
 });
 
 test('perfil legado encapsulado é migrado sem erro', async () => {
@@ -844,4 +872,12 @@ test('dependências nativas do fallback Windows são opcionais em outras platafo
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/check.yml'), 'utf8');
   assert.match(workflow, /cross-platform-check/);
   assert.match(workflow, /ubuntu-latest, macos-latest/);
+});
+
+
+test('perfil 4K preserva tentativa rápida e mantém verificação pós-carga', async () => {
+  const source = await fsp.readFile(path.join(__dirname, '..', 'src', 'diagnostics', 'HardwareProfile.ts'), 'utf8');
+  assert.match(source, /Math\.min\(34, Math\.floor\(freeGb \* 9\)\)/);
+  const engine = await fsp.readFile(path.join(__dirname, '..', 'src', 'engine', 'EngineClient.ts'), 'utf8');
+  assert.match(engine, /minimumPostLoadGpuFreeBytes/);
 });

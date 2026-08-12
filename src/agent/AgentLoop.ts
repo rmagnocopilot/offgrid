@@ -1,5 +1,6 @@
 import type { ToolCall, ToolResult } from '../types/contracts';
-import { detectToolCalls, looksLikeToolCall, looksLikeToolSchema } from './ToolCallParser';
+import { detectToolCalls, looksLikeToolCall, looksLikeToolSchema, looksLikeTruncatedCreateFileCall } from './ToolCallParser';
+import { compactTaskReminderForContinuation, serializeToolArgumentsForPrompt, serializeToolResultForPrompt } from './AgentToolResultBudget';
 
 export interface AgentLoopLogger {
   (level: 'trace' | 'debug' | 'info' | 'warn' | 'error', message: string): void;
@@ -13,6 +14,8 @@ export interface AgentLoopOptions {
   diagnosticMode: boolean;
   invokeStep: (prompt: string, step: number) => Promise<string>;
   executeTool: (call: ToolCall) => Promise<ToolResult>;
+  /** Limite total aproximado do prompt de continuação após ferramentas. */
+  continuationPromptMaxChars?: number;
   log: AgentLoopLogger;
 }
 
@@ -41,25 +44,46 @@ function ensureNotAborted(signal?: AbortSignal): void {
   }
 }
 
-function resultPrompt(executed: ExecutedTool[], taskReminder?: string): string {
-  const toolResults = executed.flatMap(({ call, result }) => [
-    '<resultado_ferramenta>',
-    `Nome: ${call.name}`,
-    `Argumentos: ${JSON.stringify(call.arguments)}`,
-    `Sucesso: ${result.ok}`,
-    `Resultado: ${JSON.stringify(result.content)}`,
-    result.error ? `Erro: ${result.error}` : '',
-    '</resultado_ferramenta>'
-  ].filter(Boolean));
-
-  return [
-    ...toolResults,
-    '',
-    taskReminder ? `Lembre-se da tarefa original:\n${taskReminder}` : '',
+function resultPrompt(
+  executed: ExecutedTool[],
+  taskReminder?: string,
+  maxChars = 6_000
+): string {
+  const totalLimit = Math.max(900, Math.floor(maxChars));
+  const reminderLimit = Math.max(220, Math.min(700, Math.floor(totalLimit * 0.28)));
+  const compactReminder = taskReminder
+    ? compactTaskReminderForContinuation(taskReminder, reminderLimit)
+    : '';
+  const fixedTail = [
+    compactReminder ? `Lembre-se da tarefa original:\n${compactReminder}` : '',
     'Continue a tarefa considerando TODOS os resultados acima.',
     'Chame somente as ferramentas que ainda forem necessárias.',
     'Nunca mostre JSON de ferramenta ao usuário. Finalize em texto ou prepare uma revisão.'
   ].filter(Boolean).join('\n');
+
+  const remaining = Math.max(420, totalLimit - fixedTail.length - 32);
+  const perResult = Math.max(320, Math.floor(remaining / Math.max(1, executed.length)));
+  const toolResults = executed.map(({ call, result }) => {
+    const argumentLimit = Math.max(120, Math.min(360, Math.floor(perResult * 0.24)));
+    const errorText = result.error
+      ? compactTaskReminderForContinuation(String(result.error), Math.max(120, Math.floor(perResult * 0.22)))
+      : '';
+    const contentLimit = Math.max(160, perResult - argumentLimit - errorText.length - 140);
+    return [
+      '<resultado_ferramenta>',
+      `Nome: ${call.name}`,
+      `Argumentos: ${serializeToolArgumentsForPrompt(call.name, call.arguments, argumentLimit)}`,
+      `Sucesso: ${result.ok}`,
+      `Resultado: ${serializeToolResultForPrompt(call.name, result.content, contentLimit)}`,
+      errorText ? `Erro: ${errorText}` : '',
+      '</resultado_ferramenta>'
+    ].filter(Boolean).join('\n');
+  });
+
+  return [
+    ...toolResults,
+    fixedTail
+  ].filter(Boolean).join('\n\n');
 }
 
 function cleanTaskReminder(taskReminder?: string): string {
@@ -145,7 +169,14 @@ export class AgentLoop {
         if (!detected.length) {
           if (looksLikeToolCall(response)) {
             const schema = looksLikeToolSchema(response);
-            options.log('warn', `${schema ? 'Schema de ferramenta' : 'Chamada de ferramenta inválida'} recebido: ${response.slice(0, 2000)}`);
+            const truncatedCreateFile = !schema && looksLikeTruncatedCreateFileCall(response);
+            options.log('warn', `${schema ? 'Schema de ferramenta' : truncatedCreateFile ? 'create_file truncado' : 'Chamada de ferramenta inválida'} recebido: ${response.slice(0, 2000)}`);
+            if (truncatedCreateFile) {
+              throw Object.assign(
+                new Error('A chamada create_file foi truncada antes de fechar o conteúdo. O limite de saída da geração foi insuficiente para o arquivo completo.'),
+                { name: 'ToolCallTruncatedError' }
+              );
+            }
             if (!invalidRecoveryUsed) {
               invalidRecoveryUsed = true;
               prompt = recoveryPrompt(schema, options.taskReminder);
@@ -202,7 +233,7 @@ export class AgentLoop {
             executed.push({ call: finalizer, result: skipped });
             options.log('warn', skipped.error ?? 'apply_changes adiado.');
           }
-          prompt = resultPrompt(executed, options.taskReminder);
+          prompt = resultPrompt(executed, options.taskReminder, options.continuationPromptMaxChars);
           break;
         }
 
@@ -237,7 +268,7 @@ export class AgentLoop {
           options.log('warn', skipped.error ?? 'apply_changes adiado.');
         }
 
-        prompt = resultPrompt(executed, options.taskReminder);
+        prompt = resultPrompt(executed, options.taskReminder, options.continuationPromptMaxChars);
         break;
       }
     }

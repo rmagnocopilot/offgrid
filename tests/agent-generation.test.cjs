@@ -5,7 +5,7 @@ const os = require('node:os');
 const fsp = require('node:fs/promises');
 
 const { AgentLoop } = require('../out/agent/AgentLoop');
-const { looksLikeToolCall } = require('../out/agent/ToolCallParser');
+const { looksLikeToolCall, looksLikeTruncatedCreateFileCall } = require('../out/agent/ToolCallParser');
 const { tryPrepareSimpleEditFastPath } = require('../out/agent/SimpleEditFastPath');
 const {
   agentOutputTokenFloor,
@@ -24,6 +24,11 @@ test('reserva orçamento estendido para criação de arquivo de testes', () => {
 test('reconhece criação de teste unitário Java em português', () => {
   const request = 'crie os testes unitarios dessa classe seguindo AcompanhamentoObrasHistoricoDTOTest';
   assert.equal(isJavaUnitTestCreationTask(request), true);
+});
+
+test('reserva saída longa para create_file de teste Java', () => {
+  const request = 'crie os testes unitarios dessa classe seguindo AcompanhamentoObrasHistoricoDTOTest';
+  assert.equal(agentOutputTokenFloor(request), 2048);
 });
 
 test('mantem orcamento padrao para edicao simples', () => {
@@ -71,7 +76,7 @@ test('recuperacao de JSON preserva a tarefa original', async () => {
       attempt += 1;
 
       if (attempt === 1) {
-        return '{"name":"create_file","arguments":{"filePath":"a.spec.ts","content":"';
+        return '{"name":"create_file","arguments":"argumentos-invalidos"}';
       }
 
       return '{"name":"create_file","arguments":{"filePath":"a.spec.ts","content":"it(\\"ok\\", () => expect(true).toBeTrue());"}}';
@@ -135,6 +140,30 @@ test('rejeita JUnit 5 quando a tarefa pede JUnit 4', () => {
   assert.match(issue, /pediu JUnit 4/);
 });
 
+
+test('detecta create_file cortado no meio do content por maxTokens', () => {
+  const response = '{"name":"create_file","arguments":{"filePath":"src/A.java","content":"class A {\n  void teste() {';
+  assert.equal(looksLikeTruncatedCreateFileCall(response), true);
+});
+
+test('AgentLoop não desperdiça segunda geração quando create_file já veio truncado', async () => {
+  let generations = 0;
+  await assert.rejects(() => new AgentLoop().run({
+    initialPrompt: 'crie o arquivo',
+    taskReminder: 'Crie src/A.java.',
+    maxSteps: 2,
+    diagnosticMode: false,
+    log() {},
+    async invokeStep() {
+      generations += 1;
+      return '{"name":"create_file","arguments":{"filePath":"src/A.java","content":"class A {';
+    },
+    async executeTool(call) {
+      return { callId: call.id, name: call.name, ok: true, content: null, durationMs: 0 };
+    }
+  }), /truncada/i);
+  assert.equal(generations, 1);
+});
 
 test('JSON órfão com filePath e content é tratado como chamada inválida', () => {
   const response = 'Aqui está o arquivo:\n```json\n{"filePath":"src/A.java","content":"class A {}"}\n```';

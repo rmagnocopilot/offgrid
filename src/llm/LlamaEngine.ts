@@ -477,6 +477,12 @@ export class LlamaEngine {
             `primeiroToken=${firstTokenAt !== null ? firstTokenAt - started : 'nunca'} ms`
           ].join(' ')
         );
+        if (tokenCount >= effectiveMaxTokens) {
+          this.log(
+            'warn',
+            `[Agent][Prompt] Saída atingiu o limite configurado (${effectiveMaxTokens} tokens). Uma chamada de ferramenta longa pode ter sido truncada.`
+          );
+        }
         return response;
       } catch (error) {
         const elapsed = Date.now() - started;

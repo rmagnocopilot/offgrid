@@ -48,7 +48,11 @@ export function calculateAgentContextBudget(params: AgentContextBudgetParams): A
   const minimumOutputTokens = Math.max(0, Math.floor(params.minimumOutputTokens ?? 0));
 
   const standardOutputCap = Math.max(96, Math.floor(contextSize * 0.16));
-  const extendedOutputCap = Math.max(standardOutputCap, Math.floor(contextSize * 0.25));
+  const longFileGeneration = minimumOutputTokens >= 1_536;
+  const extendedOutputCap = Math.max(
+    standardOutputCap,
+    Math.floor(contextSize * (longFileGeneration ? 0.50 : 0.25))
+  );
   const outputCap = minimumOutputTokens > standardOutputCap
     ? extendedOutputCap
     : standardOutputCap;
@@ -58,11 +62,13 @@ export function calculateAgentContextBudget(params: AgentContextBudgetParams): A
   );
 
   const safetyTokens = Math.max(64, Math.floor(contextSize * 0.06));
-  const continuationTokens = contextSize <= 4_096
-    ? Math.max(512, Math.floor(contextSize * 0.18))
-    : contextSize <= 8_192
-      ? Math.max(512, Math.floor(contextSize * 0.10))
-      : Math.max(384, Math.floor(contextSize * 0.06));
+  const continuationTokens = longFileGeneration
+    ? 128
+    : contextSize <= 4_096
+      ? Math.max(512, Math.floor(contextSize * 0.18))
+      : contextSize <= 8_192
+        ? Math.max(512, Math.floor(contextSize * 0.10))
+        : Math.max(384, Math.floor(contextSize * 0.06));
 
   const availableInitialInputTokens = Math.max(
     0,
