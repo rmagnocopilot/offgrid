@@ -75,3 +75,26 @@ test('AgentLoop limita prompt após ferramenta de leitura grande', async () => {
   assert.match(prompts[1], /crie o teste/);
   assert.doesNotMatch(prompts[1], /assertEquals\(1, 1\);(?:\\nassertEquals\(1, 1\);){100}/);
 });
+
+test('resultado JaCoCo preserva resumo e omite saída extensa do build', () => {
+  const serialized = serializeToolResultForPrompt('run_java_coverage', {
+    moduleRoot: 'app',
+    buildSystem: 'maven',
+    reportPath: 'app/target/site/jacoco/jacoco.xml',
+    className: 'TarifaService',
+    summary: {
+      methodsTotal: 3,
+      methodsFullyCovered: 1,
+      methodsPartiallyCovered: 1,
+      methodsUncovered: 1,
+      uncoveredMethods: [{ name: 'calcularEspecial', missedInstructions: 12, missedBranches: 2 }],
+      partialMethods: [{ name: 'calcular', missedInstructions: 4, missedBranches: 1 }]
+    },
+    stdout: 'x'.repeat(12000),
+    stderr: ''
+  }, 900);
+  assert.ok(serialized.length <= 900);
+  assert.match(serialized, /calcularEspecial/);
+  assert.match(serialized, /buildOutputOmitted/);
+  assert.doesNotMatch(serialized, /x{200}/);
+});

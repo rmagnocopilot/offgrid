@@ -2,24 +2,30 @@
   <img src="resources/branding/offgrid-logo.png" alt="Offgrid" width="260">
 </p>
 
-# Offgrid 2.0.8
+# Offgrid 2.0.9
 
 Assistente local e offline para Visual Studio Code, reescrito em **TypeScript**. A arquitetura segue a separação usada pelo Unplugged entre Agente, ferramentas, contexto, segurança, motor LLM e interface, preservando os recursos adicionais construídos no Offgrid.
 
-## Novidades da versão 2.0.8
+## Novidades da versão 2.0.9
 
-- adiciona o **Adaptive Fast Path**: antes de iniciar o AgentLoop, o Offgrid analisa deterministicamente a estrutura do projeto, módulo, linguagem, build, source/test roots, framework e arquivo de referência citado pelo usuário;
-- pedidos guiados por padrão, como “crie os testes desta classe seguindo `AcompanhamentoObrasHistoricoDTOTest`”, passam a extrair o padrão real do workspace e inferir destino, pacote e nomenclatura sem depender da navegação do modelo;
-- padrões mecânicos de alta confiança podem ser **sintetizados localmente em TypeScript**, sem chamar o LLM. O caso de DTO Java com getters/setters e teste de referência é tratado dessa forma, eliminando a geração de vários minutos observada no Qwen3 4B;
-- quando interpretação semântica ainda é necessária, o Adaptive Fast Path usa uma **geração direta compacta**: o modelo devolve somente o conteúdo do arquivo. O TypeScript monta `create_file` internamente, evitando transportar milhares de caracteres dentro de JSON de ferramenta;
-- o perfil do projeto é cacheado em memória e invalidado quando os manifests relevantes mudam, reduzindo varreduras repetidas do workspace;
-- referências Java de teste preservam corpos reais de métodos `@Test` durante a compactação, permitindo aprender estilo e convenções sem enviar o arquivo inteiro ao modelo;
-- o caminho genérico também suporta criação por referência explícita, por exemplo `PedidoService.java` seguindo `ClienteService.java`, quando destino e localização podem ser inferidos com alta confiança;
-- se a síntese local ou a geração direta produzir conteúdo incompleto, com pacote incorreto ou chaves desbalanceadas, nenhuma escrita é preparada;
-- o AgentLoop tradicional continua disponível como fallback para tarefas sem padrão estrutural confiável;
-- mantém a proteção de contexto 4K, orçamento de resultados de ferramentas, detecção de `create_file` truncado e recuperação segura após operações somente de leitura;
-- mantém perfil Vulkan rápido quando a carga deixa VRAM saudável e reduz camadas automaticamente apenas quando necessário;
-- mantém as melhorias anteriores: fallback embarcado `node-llama-cpp`, logs de produção mais limpos, interface Chat/Planejar/Agente e revisão/rollback de alterações.
+- corrige o caso real em que pedidos como **“crie a classe de testes para TarifaSiapfDTO usando AcompanhamentoObrasHistoricoDTOTest como exemplo”** eram reconhecidos como teste Java pelo `TaskIntent`, mas não pelo Adaptive Fast Path por não conterem a palavra “unitário”;
+- o Adaptive Fast Path passa a reconhecer **classe de testes Java** quando há uma origem Java comprovada, sem confundir specs TypeScript;
+- quando um teste de referência é citado explicitamente, o diretório desse teste passa a ser a evidência principal para o destino. Isso preserva convenções como `src/main/.../dto` → `src/test/.../tests/dto`, sem presumir espelhamento de packages;
+- o cenário DTO + teste de referência volta ao caminho determinístico: o teste é sintetizado localmente em TypeScript e preparado via `create_file`, sem geração longa pelo Qwen;
+- o fallback do AgentLoop não pode mais encerrar uma tarefa de criação apenas mostrando código no chat. Se houver destino determinístico e o modelo retornar um arquivo completo, o Offgrid converte esse conteúdo internamente em `create_file`;
+- se a saída de código vier truncada, com fence ou classe sem fechamento, o Agente encerra com erro explícito e **não apresenta o arquivo incompleto como resposta válida**;
+- tarefas Java reconhecidas removem `list_files` do catálogo quando origem e referência já podem ser resolvidas pelo contexto, evitando a etapa redundante observada na 2.0.8;
+- o Adaptive Fast Path agora resolve a **classe-alvo citada no pedido**, mesmo quando `pom.xml` ou outro arquivo está ativo, e restringe a busca da referência ao mesmo módulo antes de considerar outros caminhos do workspace;
+- se o arquivo de destino já existir, o caminho adaptativo é idempotente: não faz nada quando o conteúdo já corresponde ao padrão e prepara `apply_edit` quando precisa corrigir/completar o arquivo, sem cair automaticamente no AgentLoop;
+- depois que origem, referência e destino foram resolvidos pelo Adaptive Fast Path, uma falha na geração direta é terminal e clara; o Offgrid não inicia uma segunda execução longa do AgentLoop para a mesma tarefa;
+- a síntese local de teste Java só presume `new Classe()` quando a classe-alvo realmente possui construtor vazio acessível (ou nenhum construtor explícito);
+- o fallback Vulkan agora é **monotônico**: depois de tentar menos camadas, nunca volta a tentar um número maior na mesma carga;
+- adiciona a ferramenta `run_java_coverage`: quando o projeto já possui JaCoCo configurado, o Agente pode executar Maven/Gradle mediante confirmação, ler `jacoco.xml` e receber diretamente os métodos sem cobertura e os parcialmente cobertos, sem enviar o relatório HTML inteiro ao modelo;
+- o Offgrid não adiciona JaCoCo automaticamente ao `pom.xml`/`build.gradle`; ausência do plugin é informada para revisão separada;
+- resultados JaCoCo são compactados antes de voltar ao modelo, preservando métodos/branches pendentes e omitindo a saída extensa do build;
+- Fast Paths determinísticos podem concluir alterações mesmo sem um modelo carregado; o modelo só passa a ser obrigatório quando a tarefa realmente precisar de geração LLM/AgentLoop;
+- mantém o orçamento de contexto 4K, compactação de resultados de ferramentas, proteção de VRAM pós-carga e fallback embarcado `node-llama-cpp`;
+- inclui regressões automatizadas para reproduzir o prompt corporativo que falhou na 2.0.8 e os novos cenários de origem fora do arquivo ativo, módulos duplicados, destino existente, construtor obrigatório e JaCoCo.
 
 ## Abrir o Offgrid
 
@@ -78,6 +84,18 @@ No Windows, quando a execução do `llama-server.exe` é impedida por Política 
 - perfil funcional por máquina e modelo.
 
 No Linux e macOS, falhas de telemetria não impedem o Offgrid de iniciar. O motor usa a detecção padrão disponível e pode fazer fallback para CPU.
+## Cobertura Java com JaCoCo
+
+Quando o módulo Java já possui JaCoCo configurado, o Modo Agente pode usar `run_java_coverage` para executar os testes e gerar o relatório XML. A execução do comando **sempre pede confirmação**. O Offgrid lê o `jacoco.xml` localmente e devolve ao Agente um resumo compacto com:
+
+- métodos totalmente sem cobertura;
+- métodos parcialmente cobertos;
+- instruções ainda não cobertas;
+- branches ainda não cobertos;
+- linha inicial do método quando o relatório fornece essa informação.
+
+Em Maven, o caminho usa o wrapper `mvnw` quando disponível e, caso contrário, `mvn`. Em Gradle, prefere `gradlew`. O Offgrid não altera o arquivo de build para instalar/configurar JaCoCo automaticamente; se a cobertura não estiver configurada, a ferramenta encerra com uma mensagem explícita. Isso permite usar cobertura como segunda etapa para Services, Controllers, validators e outras classes com regras/branches mais complexos, sem obrigar DTOs simples a pagar esse custo.
+
 ## Segurança
 
 - `node_modules` e `.git` são somente leitura;
@@ -121,7 +139,7 @@ npm run package
 Arquivo esperado:
 
 ```text
-offgrid-2.0.8.vsix
+offgrid-2.0.9.vsix
 ```
 
 Os modelos em `globalStorage/rmagnocopilot.offgrid/models` permanecem após a atualização do VSIX.

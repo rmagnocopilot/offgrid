@@ -78,6 +78,7 @@ public class AcompanhamentoObrasHistoricoDTOTest {
 }
 
 const REQUEST = 'crie os testes unitarios dessa classe, os testes devem seguir o modelo da classe de teste ja criada (AcompanhamentoObrasHistoricoDTOTest) o novo teste deve estar no mesmo pacote e seguir o mesmo padrao de nomeclatura';
+const REQUEST_208_LOG = 'crie a classe de testes para o arquivo (TarifaSiapfDTO)\npode usar (AcompanhamentoObrasHistoricoDTOTest) como exemplo para local, e padrao dos testes';
 
 const GENERATED = `package br.gov.caixa.siavo.tests.dto;
 
@@ -146,6 +147,38 @@ test('caso corporativo de DTO é sintetizado localmente sem chamar o modelo', as
   assert.match(content, /testGetSetCodTarifa/);
   assert.match(content, /testGetSetDescricaoTarifa/);
   assert.match(content, /assertEquals/);
+  assert.match(result.text, /sem geração LLM/i);
+  assert.match(result.text, new RegExp(referencePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('pedido real da 2.0.8 infere destino pelo teste de referência e não cai no AgentLoop', async t => {
+  const { root, sourcePath, referencePath } = await createSiavoWorkspace();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  let generations = 0;
+  const calls = [];
+  const result = await tryPrepareAdaptivePatternFastPath({
+    request: REQUEST_208_LOG,
+    workspaceRoot: root,
+    priority: [sourcePath],
+    contextSize: 4096,
+    async generate() {
+      generations += 1;
+      return GENERATED;
+    },
+    async execute(call) {
+      calls.push(call);
+      return { callId: call.id, name: call.name, ok: true, content: { staged: true }, durationMs: 1 };
+    }
+  });
+
+  assert.ok(result);
+  assert.equal(result.complete, true);
+  assert.equal(generations, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'create_file');
+  assert.equal(calls[0].arguments.filePath, 'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/TarifaSiapfDTOTest.java');
+  assert.match(String(calls[0].arguments.content), /class TarifaSiapfDTOTest/);
+  assert.match(String(calls[0].arguments.content), /testGetSetDescricaoTarifa/);
   assert.match(result.text, /sem geração LLM/i);
   assert.match(result.text, new RegExp(referencePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
@@ -288,4 +321,107 @@ test('geração direta usa sessão isolada e restaura chat sem tool-call JSON', 
   assert.match(block, /agentStep/);
   assert.match(block, /agentFinish/);
   assert.doesNotMatch(block, /new AgentLoop/);
+});
+
+test('resolve classe-alvo citada mesmo quando o arquivo ativo não é Java', async t => {
+  const { root, sourcePath, referencePath } = await createSiavoWorkspace();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const calls = [];
+  const result = await tryPrepareAdaptivePatternFastPath({
+    request: REQUEST_208_LOG,
+    workspaceRoot: root,
+    priority: ['siavo-ejb/pom.xml'],
+    contextSize: 4096,
+    async generate() { throw new Error('LLM não deveria ser chamado'); },
+    async execute(call) {
+      calls.push(call);
+      return { callId: call.id, name: call.name, ok: true, content: { staged: true }, durationMs: 0 };
+    }
+  });
+  assert.ok(result);
+  assert.equal(result.complete, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'create_file');
+  assert.equal(calls[0].arguments.filePath, 'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/TarifaSiapfDTOTest.java');
+  const foundSource = await require('../out/agent/ProjectProfiler').findWorkspaceSource(root, REQUEST_208_LOG, ['siavo-ejb/pom.xml'], '.java');
+  assert.equal(foundSource, sourcePath);
+  const moduleRef = await findWorkspaceReference(root, REQUEST_208_LOG, [], '.java', 'siavo-ejb');
+  assert.equal(moduleRef, referencePath);
+});
+
+test('referência explícita fica no mesmo módulo da origem quando há nomes duplicados', async t => {
+  const { root, sourcePath, referencePath } = await createSiavoWorkspace();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const other = path.join(root, 'outro-modulo/src/test/java/br/gov/exemplo/AcompanhamentoObrasHistoricoDTOTest.java');
+  await fsp.mkdir(path.dirname(other), { recursive: true });
+  await fsp.writeFile(other, 'package br.gov.exemplo; public class AcompanhamentoObrasHistoricoDTOTest {}', 'utf8');
+  await fsp.writeFile(path.join(root, 'outro-modulo/pom.xml'), '<project/>', 'utf8');
+  const found = await findWorkspaceReference(root, REQUEST_208_LOG, [], '.java', 'siavo-ejb');
+  assert.equal(found, referencePath);
+  assert.equal(sourcePath.startsWith('siavo-ejb/'), true);
+});
+
+test('destino já existente é atualizado por apply_edit em vez de cair no AgentLoop', async t => {
+  const { root, sourcePath } = await createSiavoWorkspace();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const target = 'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/TarifaSiapfDTOTest.java';
+  const absolute = path.join(root, target);
+  await fsp.mkdir(path.dirname(absolute), { recursive: true });
+  await fsp.writeFile(absolute, 'package br.gov.caixa.siavo.tests.dto;\npublic class TarifaSiapfDTOTest {\n}\n', 'utf8');
+  const calls = [];
+  const result = await tryPrepareAdaptivePatternFastPath({
+    request: REQUEST_208_LOG,
+    workspaceRoot: root,
+    priority: [sourcePath],
+    contextSize: 4096,
+    async generate() { throw new Error('LLM não deveria ser chamado'); },
+    async execute(call) {
+      calls.push(call);
+      return { callId: call.id, name: call.name, ok: true, content: { staged: true }, durationMs: 0 };
+    }
+  });
+  assert.ok(result);
+  assert.equal(result.complete, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'apply_edit');
+  assert.equal(calls[0].arguments.filePath, target);
+  assert.match(String(calls[0].arguments.newText), /testGetSetCodObjetivo/);
+});
+
+test('falha na geração direta é terminal e não devolve undefined para iniciar AgentLoop', async t => {
+  const { root, sourcePath } = await createSiavoWorkspace();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const absolute = path.join(root, sourcePath);
+  const source = await fsp.readFile(absolute, 'utf8');
+  await fsp.writeFile(absolute, source.replace('private String codObjetivo;', 'private ConfiguracaoTarifa codObjetivo;').replace('public String getCodObjetivo()', 'public ConfiguracaoTarifa getCodObjetivo()').replace('public void setCodObjetivo(String value)', 'public void setCodObjetivo(ConfiguracaoTarifa value)'), 'utf8');
+  const result = await tryPrepareAdaptivePatternFastPath({
+    request: REQUEST,
+    workspaceRoot: root,
+    priority: [sourcePath],
+    contextSize: 4096,
+    async generate() { throw new Error('timeout simulado'); },
+    async execute(call) { return { callId: call.id, name: call.name, ok: true, content: null, durationMs: 0 }; }
+  });
+  assert.ok(result);
+  assert.equal(result.complete, false);
+  assert.match(result.text, /AgentLoop não será iniciado/i);
+});
+
+test('sintetizador local não presume construtor vazio quando a origem exige argumentos', async t => {
+  const { root, sourcePath } = await createSiavoWorkspace();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const absolute = path.join(root, sourcePath);
+  const source = await fsp.readFile(absolute, 'utf8');
+  await fsp.writeFile(absolute, source.replace('public class TarifaSiapfDTO {', 'public class TarifaSiapfDTO {\n    public TarifaSiapfDTO(String obrigatorio) {}'), 'utf8');
+  let generations = 0;
+  const result = await tryPrepareAdaptivePatternFastPath({
+    request: REQUEST_208_LOG,
+    workspaceRoot: root,
+    priority: [sourcePath],
+    contextSize: 4096,
+    async generate() { generations += 1; return GENERATED; },
+    async execute(call) { return { callId: call.id, name: call.name, ok: true, content: { staged: true }, durationMs: 0 }; }
+  });
+  assert.ok(result);
+  assert.equal(generations, 1);
 });

@@ -21,6 +21,7 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   schema('delete_file', 'Prepara exclusão de arquivo para revisão.', { filePath: stringProp(), reason: stringProp('Motivo técnico para excluir o arquivo') }, true, ['filePath']),
   schema('rename_file', 'Prepara renomear ou mover um arquivo existente para um novo caminho, preservando o conteúdo.', { filePath: stringProp('Caminho atual'), newPath: stringProp('Novo caminho') }, true, ['filePath','newPath']),
   schema('run_terminal', 'Executa comando no terminal após confirmação explícita.', { command: stringProp() }, true, ['command']),
+  schema('run_java_coverage', 'Executa a cobertura JaCoCo já configurada no módulo Java e retorna métodos sem cobertura ou parcialmente cobertos. Nunca altera pom.xml/build.gradle automaticamente e sempre pede confirmação antes de executar.', { filePath: stringProp('Arquivo Java de produção usado para localizar módulo e classe') }, true, ['filePath']),
   schema('apply_changes', 'Finaliza alterações preparadas e abre revisão.', { summary: stringProp() }, true, ['summary'])
 ];
 

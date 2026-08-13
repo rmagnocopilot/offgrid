@@ -87,6 +87,6 @@ test('perfil GPU exige folga pós-carga antes de ser persistido', async () => {
   const hardware = await source('src/diagnostics/HardwareProfile.ts');
   assert.match(client, /minimumPostLoadGpuFreeBytes/);
   assert.match(client, /Tentando um perfil com menos camadas/);
-  assert.match(hardware, /PROFILE_STRATEGY_VERSION = 2/);
+  assert.match(hardware, /PROFILE_STRATEGY_VERSION = 3/);
   assert.match(hardware, /reserva .*GB/);
 });

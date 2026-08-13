@@ -4,7 +4,7 @@ import * as fsp from 'node:fs/promises';
 import type { Backend, EngineLoadOptions, ResourceSnapshot } from '../types/contracts';
 
 export interface LoadAttempt { gpu: Backend; gpuLayers: number | 'auto'; reason: string }
-const PROFILE_STRATEGY_VERSION = 2;
+const PROFILE_STRATEGY_VERSION = 3;
 interface StoredProfile {
   strategyVersion: number;
   modelKey: string;
@@ -90,7 +90,18 @@ export function chooseLoadAttempts(options: EngineLoadOptions, resources: Resour
     attempts.push({ gpu: 'auto', gpuLayers: options.gpuLayers, reason: 'Detecção automática do backend' });
   }
   if (options.fallbackToCpu) attempts.push({ gpu: 'cpu', gpuLayers: 0, reason: 'Fallback final para CPU' });
-  return dedupe(attempts);
+  return monotonicDedupe(attempts);
+}
+
+function monotonicDedupe(attempts: LoadAttempt[]): LoadAttempt[] {
+  const unique = dedupe(attempts);
+  let maximumNumericLayers = Number.POSITIVE_INFINITY;
+  return unique.filter(item => {
+    if (item.gpu !== 'vulkan' || typeof item.gpuLayers !== 'number') return true;
+    if (item.gpuLayers > maximumNumericLayers) return false;
+    maximumNumericLayers = item.gpuLayers;
+    return true;
+  });
 }
 
 function dedupe(attempts: LoadAttempt[]): LoadAttempt[] {

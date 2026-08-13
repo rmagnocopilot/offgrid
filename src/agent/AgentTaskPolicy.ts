@@ -4,6 +4,7 @@ const DIRECT_FILE_CREATION = /\b(?:crie|criar|gere|gerar|produza|produzir|monte|
 const ADD_NEW_FILE = /\b(?:adicione|adicionar|implemente|implementar)\s+(?:(?:um|uma|o|a)\s+)?(?:novo|nova)\s+(?:arquivo|spec(?:\.ts)?|componente|servi(?:c|\u00e7)o|service|classe|m(?:o|\u00f3)dulo)\b/i;
 const DIRECT_TEST_CREATION = /\b(?:crie|criar|gere|gerar|adicione|adicionar|escreva|escrever)\b[\s\S]{0,100}\b\d*\s*testes?\b/i;
 const JAVA_UNIT_TEST_CREATION = /\b(?:testes?\s+unit[aá]rio(?:s)?|unit\s+tests?|junit)\b/i;
+const GENERIC_TEST_CLASS_CREATION = /\b(?:classe\s+de\s+testes?|classe\s+de\s+teste|test\s+class|tests?\s+(?:para|da|dessa|desta)\s+(?:classe|arquivo))\b/i;
 
 const PLACEHOLDER_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bTODO\b/i, label: 'TODO' },
@@ -42,9 +43,22 @@ export function isFileCreationTask(request: string): boolean {
 /**
  * Identifica pedidos explícitos de criação de teste unitário Java.
  */
-export function isJavaUnitTestCreationTask(request: string): boolean {
+export function isJavaUnitTestCreationTask(
+  request: string,
+  sourceHints: readonly string[] = []
+): boolean {
   const normalized = String(request ?? '').replace(/\s+/g, ' ').trim();
-  return isFileCreationTask(normalized) && JAVA_UNIT_TEST_CREATION.test(normalized);
+  if (!isFileCreationTask(normalized)) return false;
+  if (JAVA_UNIT_TEST_CREATION.test(normalized)) return true;
+
+  // Usuários frequentemente pedem "crie a classe de testes" sem escrever
+  // explicitamente "unitários". Só tratamos essa forma genérica como teste
+  // Java quando já existe uma origem Java comprovada no contexto/prioridade,
+  // evitando classificar specs TypeScript como JUnit por engano.
+  const hasJavaSource = sourceHints.some(value =>
+    /(?:^|\/)src\/main\/java\/.*\.java$/i.test(String(value ?? '').replace(/\\/g, '/').split('#')[0] ?? '')
+  );
+  return hasJavaSource && GENERIC_TEST_CLASS_CREATION.test(normalized);
 }
 
 /**
@@ -87,7 +101,7 @@ export function javaUnitTestCreationTarget(
   referenceFiles: readonly string[] = []
 ): string | undefined {
   const normalized = String(request ?? '').replace(/\s+/g, ' ').trim();
-  if (!isJavaUnitTestCreationTask(normalized)) return undefined;
+  if (!isJavaUnitTestCreationTask(normalized, priority)) return undefined;
 
   const source = priority
     .map(value => String(value ?? '').split('#')[0]?.replace(/\\/g, '/'))
@@ -111,16 +125,31 @@ export function javaUnitTestCreationTarget(
     );
   }
 
-  // Quando o usuário diz "no mesmo pacote" e cita um teste-exemplo, use o
-  // diretório desse teste como destino. Isso evita que modelos pequenos
-  // inventem o pacote após ler a referência.
+  // Quando o usuário cita explicitamente um teste-exemplo, o diretório desse
+  // arquivo é a evidência mais forte para a convenção de pacote/local de testes.
+  // Isso cobre projetos em que src/main/java/br/.../dto é testado em
+  // src/test/java/br/.../tests/dto, sem pressupor que os pacotes são espelhados.
+  const normalizedModule = modulePrefix.toLowerCase();
+  const explicitExample = referenceFiles
+    .map(value => String(value ?? '').split('#')[0]?.replace(/\\/g, '/'))
+    .find(value => {
+      if (!value || !/\/src\/test\/java\/.*(?:Test|Tests)\.java$/i.test(value)) return false;
+      if (path.posix.basename(value).toLowerCase() === `${className.toLowerCase()}test.java`) return false;
+      const valueMarker = value.toLowerCase().indexOf('/src/test/java/');
+      const valueModule = valueMarker >= 0 ? value.slice(0, valueMarker).toLowerCase() : '';
+      if (valueModule !== normalizedModule) return false;
+      const stem = path.posix.basename(value, '.java');
+      return new RegExp(`\\b${escapeRegExp(stem)}\\b`, 'i').test(normalized);
+    });
+  if (explicitExample) return path.posix.join(path.posix.dirname(explicitExample), `${className}Test.java`);
+
+  // Mantém a formulação explícita "mesmo pacote/pasta" como fallback quando
+  // a referência foi resolvida pelo contexto, mesmo sem o nome aparecer no texto.
   if (/\b(?:mesm[oa]\s+(?:pacote|pasta)|same\s+package)\b/i.test(normalized)) {
-    const normalizedModule = modulePrefix.toLowerCase();
     const example = referenceFiles
       .map(value => String(value ?? '').split('#')[0]?.replace(/\\/g, '/'))
       .find(value => {
         if (!value || !/\/src\/test\/java\/.*(?:Test|Tests)\.java$/i.test(value)) return false;
-        if (path.posix.basename(value).toLowerCase() === `${className.toLowerCase()}test.java`) return false;
         const valueMarker = value.toLowerCase().indexOf('/src/test/java/');
         const valueModule = valueMarker >= 0 ? value.slice(0, valueMarker).toLowerCase() : '';
         return valueModule === normalizedModule;
@@ -131,12 +160,12 @@ export function javaUnitTestCreationTarget(
   return undefined;
 }
 
-export function agentOutputTokenFloor(request: string): number {
+export function agentOutputTokenFloor(request: string, sourceHints: readonly string[] = []): number {
   // Testes Java de DTO costumam carregar dezenas de métodos dentro de create_file.
   // Em 4K, 1024 tokens truncavam o JSON no meio do conteúdo e o retry repetia
   // a mesma falha. Reserve 2048 tokens para esse caso e mantenha 768 para
   // criações menores. O motor ainda reduz o valor se o tokenizer real exigir.
-  if (isJavaUnitTestCreationTask(request)) return 2_048;
+  if (isJavaUnitTestCreationTask(request, sourceHints)) return 2_048;
   return isFileCreationTask(request) ? 768 : 0;
 }
 

@@ -11,7 +11,8 @@ const {
   agentOutputTokenFloor,
   generatedFileContentIssue,
   isFileCreationTask,
-  isJavaUnitTestCreationTask
+  isJavaUnitTestCreationTask,
+  javaUnitTestCreationTarget
 } = require('../out/agent/AgentTaskPolicy');
 
 test('reserva orçamento estendido para criação de arquivo de testes', () => {
@@ -24,6 +25,24 @@ test('reserva orçamento estendido para criação de arquivo de testes', () => {
 test('reconhece criação de teste unitário Java em português', () => {
   const request = 'crie os testes unitarios dessa classe seguindo AcompanhamentoObrasHistoricoDTOTest';
   assert.equal(isJavaUnitTestCreationTask(request), true);
+});
+
+test('reconhece classe de testes Java sem exigir a palavra unitário quando há origem Java', () => {
+  const request = 'crie a classe de testes para o arquivo (TarifaSiapfDTO) pode usar (AcompanhamentoObrasHistoricoDTOTest) como exemplo para local, e padrao dos testes';
+  const source = 'siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java';
+  assert.equal(isJavaUnitTestCreationTask(request, [source]), true);
+  assert.equal(isJavaUnitTestCreationTask(request, ['src/app/cliente.component.ts']), false);
+  assert.equal(agentOutputTokenFloor(request, [source]), 2048);
+});
+
+test('destino de teste Java usa diretório do exemplo explicitamente citado', () => {
+  const request = 'crie a classe de testes para o arquivo (TarifaSiapfDTO) pode usar (AcompanhamentoObrasHistoricoDTOTest) como exemplo para local, e padrao dos testes';
+  const source = 'siavo-ejb/src/main/java/br/gov/caixa/siavo/dto/TarifaSiapfDTO.java';
+  const reference = 'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/AcompanhamentoObrasHistoricoDTOTest.java';
+  assert.equal(
+    javaUnitTestCreationTarget(request, [source], [reference]),
+    'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/TarifaSiapfDTOTest.java'
+  );
 });
 
 test('reserva saída longa para create_file de teste Java', () => {
@@ -162,6 +181,52 @@ test('AgentLoop não desperdiça segunda geração quando create_file já veio t
       return { callId: call.id, name: call.name, ok: true, content: null, durationMs: 0 };
     }
   }), /truncada/i);
+  assert.equal(generations, 1);
+});
+
+test('AgentLoop converte código completo em create_file quando criação possui destino determinístico', async () => {
+  const executions = [];
+  const result = await new AgentLoop().run({
+    initialPrompt: 'crie o teste',
+    taskReminder: 'Crie ATest.java.',
+    maxSteps: 1,
+    diagnosticMode: false,
+    requiredWrite: true,
+    expectedCreateFilePath: 'module/src/test/java/com/example/ATest.java',
+    log() {},
+    async invokeStep() {
+      return 'Aqui está o conteúdo:\n```java\npackage com.example;\nimport org.junit.Test;\npublic class ATest { @Test public void ok() {} }\n```';
+    },
+    async executeTool(call) {
+      executions.push(call);
+      return { callId: call.id, name: call.name, ok: true, content: { staged: true }, durationMs: 0 };
+    }
+  });
+  assert.equal(executions.length, 1);
+  assert.equal(executions[0].name, 'create_file');
+  assert.equal(executions[0].arguments.filePath, 'module/src/test/java/com/example/ATest.java');
+  assert.match(String(executions[0].arguments.content), /public class ATest/);
+  assert.match(result.text, /Alteração preparada para revisão/);
+});
+
+test('AgentLoop não devolve código truncado no chat quando a tarefa exige criação', async () => {
+  let generations = 0;
+  await assert.rejects(() => new AgentLoop().run({
+    initialPrompt: 'crie o teste',
+    taskReminder: 'Crie ATest.java.',
+    maxSteps: 2,
+    diagnosticMode: false,
+    requiredWrite: true,
+    expectedCreateFilePath: 'module/src/test/java/com/example/ATest.java',
+    log() {},
+    async invokeStep() {
+      generations += 1;
+      return 'Aqui está:\n```java\npackage com.example;\nimport org.junit.Test;\npublic class ATest { @Test public void ok() {';
+    },
+    async executeTool(call) {
+      return { callId: call.id, name: call.name, ok: true, content: null, durationMs: 0 };
+    }
+  }), /incompleta|fechamento/i);
   assert.equal(generations, 1);
 });
 

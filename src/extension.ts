@@ -294,7 +294,7 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
   await refreshUi(s, true);
   const mock = vscode.workspace.getConfiguration('offgrid').get<boolean>('developmentMock', false);
   if (mock) { await mockSubmit(s, text, mode); return; }
-  if (!s.engine.isLoaded) {
+  if (!s.engine.isLoaded && mode === 'chat') {
     vscode.window.showWarningMessage('Nenhum modelo carregado. Selecione um modelo no topo do painel.');
     await refreshUi(s); return;
   }
@@ -402,7 +402,7 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
       );
       const fileCreationTask = mode === 'agent' && isFileCreationTask(text);
       const genericFileCreationTask = fileCreationTask && !frontendCrudAnalysis && !backendServiceAnalysis && !backendEndpointAnalysis && !fullStackFlowAnalysis && !fullStackRelationRefactorAnalysis;
-      const javaUnitTestTask = genericFileCreationTask && isJavaUnitTestCreationTask(text);
+      const javaUnitTestTask = genericFileCreationTask && isJavaUnitTestCreationTask(text, priority);
       const rootCreationTarget = workspaceRootCreationTarget(
         layeredTask.explicitFiles,
         genericFileCreationTask
@@ -420,6 +420,7 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
       // redundante; read_file permanece como fallback pontual.
       const javaUnitTestTools = new Set([
         'read_file',
+        'run_java_coverage',
         'create_file',
         'apply_changes'
       ]);
@@ -722,6 +723,14 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         }
       }
 
+      if (!s.engine.isLoaded) {
+        response = 'Nenhum modelo está carregado. Os Fast Paths determinísticos foram avaliados, mas esta tarefa ainda precisa do modelo local.';
+        await s.view.streamChunk(messageId, response);
+        s.sessions.addMessage({ role: 'assistant', text: response });
+        s.sessions.updateMetadata({ lastError: response, backend: s.engine.diagnostics.backend });
+        return;
+      }
+
       const taskContextEstimate = estimateTaskComplexity({
         request: text,
         estimatedFiles: rootCreationTarget ? 1 : Math.max(1, contextPriority.length),
@@ -735,7 +744,7 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
       const configuredMaxTokens = vscode.workspace
         .getConfiguration('offgrid')
         .get<number>('maxTokens', 1024);
-      const minimumOutputTokens = agentOutputTokenFloor(text);
+      const minimumOutputTokens = agentOutputTokenFloor(text, contextPriority);
 
       if (contextSize < 2_048) {
         throw Object.assign(
@@ -982,7 +991,9 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
         maxTokens: budget.maxOutputTokens,
         signal: controller.signal,
         executeTool: executeAgentTool,
-        continuationPromptMaxChars: Math.max(900, budget.continuationTokens * 2)
+        continuationPromptMaxChars: Math.max(900, budget.continuationTokens * 2),
+        requiredWrite: genericFileCreationTask,
+        expectedCreateFilePath: rootCreationTarget ?? javaTestCreationTarget
       });
 
       try {
@@ -1674,11 +1685,14 @@ async function buildAgentSystemPrompt(
 ): Promise<string> {
   const priority = priorityOverride ?? s.contextManager.priority(prompt);
   const taskGuidance = fullStackFlowTaskGuidance(prompt) ?? frontendCrudTaskGuidance(prompt) ?? serviceTaskGuidance(prompt) ?? endpointTaskGuidance(prompt);
-  const javaTestContextReady = isJavaUnitTestCreationTask(prompt) && priority.length > 0;
+  const javaTestContextReady = isJavaUnitTestCreationTask(prompt, priority) && priority.length > 0;
   const readBeforeWriteGuidance = javaTestContextReady
     ? 'A classe-alvo e as referências prioritárias já estão no contexto. Não releia arquivos já fornecidos; use read_file apenas se faltar informação indispensável.'
     : 'Leia antes de editar.';
   const toolSignatures = schemas.map(compactToolSignature);
+  const coverageGuidance = schemas.some(tool => tool.name === 'run_java_coverage')
+    ? 'Para cobertura Java existente, use run_java_coverage(filePath) quando a tarefa pedir JaCoCo/cobertura. A ferramenta executa o build já configurado, pede confirmação e retorna somente métodos sem cobertura ou parcialmente cobertos; nunca altere pom.xml/build.gradle para adicionar JaCoCo sem pedido explícito.'
+    : undefined;
 
   // Modelos small (0.5B–1B) recebem prompt ultra-compacto: sem prosa,
   // só o essencial para o modelo entender o protocolo de ferramentas.
@@ -1691,6 +1705,7 @@ async function buildAgentSystemPrompt(
       'Ferramenta: responda apenas JSON {"name":"nome","arguments":{...}}; sem Markdown.',
       'Só existem as ferramentas listadas abaixo. Nunca invente nomes de ferramenta.',
       `${readBeforeWriteGuidance} Finalize com apply_changes; nunca grave direto.`,
+      coverageGuidance,
       'Ao criar arquivos, gere conteúdo completo; nunca use TODO, FIXME ou comentários de implementação pendente.',
       'Em create_file, content deve ser uma string JSON válida; escape quebras de linha e nunca use template literals com crases.',
       taskGuidance,
@@ -1707,6 +1722,7 @@ async function buildAgentSystemPrompt(
     taskGuidance,
     'Para chamar ferramenta, responda somente JSON: {"name":"nome","arguments":{...}}. Sem Markdown ou explicação.',
     `${readBeforeWriteGuidance} Altere só o necessário; finalize com apply_changes; nunca grave direto.`,
+    coverageGuidance,
     'Ao criar arquivos, gere conteúdo completo; nunca use TODO, FIXME ou comentários de implementação pendente.',
       'Em create_file, content deve ser uma string JSON válida; escape quebras de linha e nunca use template literals com crases.',
     s.autonomy === 'assisted'

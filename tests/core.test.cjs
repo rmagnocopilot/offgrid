@@ -282,6 +282,7 @@ test('Qwen3 4B em GPU de 4 GB tenta 4K rápido e mantém fallbacks conservadores
   const layers4k = attempts4k.filter(item => item.gpu === 'vulkan').map(item => item.gpuLayers);
   assert.equal(layers4k[0], 34);
   assert.ok(layers4k.some(value => typeof value === 'number' && value <= 24));
+  assert.deepEqual(layers4k, [...layers4k].sort((a, b) => Number(b) - Number(a)), 'fallback Vulkan deve ser estritamente não crescente');
 
   const attempts8k = chooseLoadAttempts(
     { ...loadOptions, modelPath: 'qwen3-4b-q4_k_m.gguf', contextSize: 8192 },
@@ -380,8 +381,8 @@ test('logger respeita nível configurado', async () => {
 test('reconhece erros comuns de memória de GPU', () => {
   assert.equal(isDeviceMemoryError(new Error('vk::Device::allocateMemory: ErrorOutOfDeviceMemory')), true); assert.equal(isDeviceMemoryError(new Error('arquivo ausente')), false);
 });
-test('catálogo contém 21 ferramentas e remove escrita de Planejar', () => {
-  assert.equal(TOOL_SCHEMAS.length, 21); assert.ok(schemasForMode('agent').some(x => x.write)); assert.ok(schemasForMode('plan').every(x => !x.write)); assert.equal(schemasForMode('chat').length, 0);
+test('catálogo contém 22 ferramentas e remove escrita de Planejar', () => {
+  assert.equal(TOOL_SCHEMAS.length, 22); assert.ok(schemasForMode('agent').some(x => x.write)); assert.ok(schemasForMode('plan').every(x => !x.write)); assert.equal(schemasForMode('chat').length, 0);
 });
 test('catálogo de modelos deriva release models-v1 do repositório', () => {
   const catalog = new ModelCatalog(root, path.join(root, '.tmp-models'));

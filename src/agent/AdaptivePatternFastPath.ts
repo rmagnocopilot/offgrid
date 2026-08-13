@@ -9,8 +9,10 @@ import { trySynthesizePattern } from './PatternSynthesizers';
 import {
   compactSourceForPattern,
   findWorkspaceReference,
+  findWorkspaceSource,
   formatProjectProfile,
   profileProject,
+  workspaceModuleRoot,
   type AdaptiveProjectProfile
 } from './ProjectProfiler';
 
@@ -47,12 +49,21 @@ export async function tryPrepareAdaptivePatternFastPath(
   if (!root || !isAdaptiveCandidate(options.request)) return undefined;
 
   const prioritySource = resolvePrioritySource(root, options.priority);
-  const preferredExtension = prioritySource ? path.extname(prioritySource).toLowerCase() : undefined;
-  const referencePath = await findWorkspaceReference(root, options.request, options.priority, preferredExtension);
+  const priorityExtension = prioritySource ? path.extname(prioritySource).toLowerCase() : undefined;
+  const requestedSource = await findWorkspaceSource(root, options.request, options.priority, priorityExtension);
+  const sourceForScope = requestedSource ?? prioritySource;
+  const preferredExtension = sourceForScope ? path.extname(sourceForScope).toLowerCase() : priorityExtension;
+  const moduleRootHint = requestedSource ? workspaceModuleRoot(root, requestedSource) : '';
+  const referencePath = await findWorkspaceReference(
+    root,
+    options.request,
+    options.priority,
+    preferredExtension,
+    moduleRootHint
+  );
   if (!referencePath) return undefined;
-  const sourcePath = prioritySource && prioritySource.toLowerCase() !== referencePath.toLowerCase()
-    ? prioritySource
-    : undefined;
+  const sourcePath = requestedSource
+    ?? (prioritySource && prioritySource.toLowerCase() !== referencePath.toLowerCase() ? prioritySource : undefined);
 
   const [sourceText, referenceText] = await Promise.all([
     sourcePath ? fsp.readFile(resolveInsideRoot(root, sourcePath), 'utf8') : Promise.resolve(''),
@@ -70,11 +81,6 @@ export async function tryPrepareAdaptivePatternFastPath(
     options.warn?.('[AdaptiveFastPath] Estrutura reconhecida, mas o destino não pôde ser inferido com confiança; usando AgentLoop.');
     return undefined;
   }
-  if (fileExists(resolveInsideRoot(root, targetPath))) {
-    options.warn?.(`[AdaptiveFastPath] O destino ${targetPath} já existe; usando AgentLoop para evitar sobrescrita.`);
-    return undefined;
-  }
-
   const synthesized = sourcePath ? trySynthesizePattern({
     request: options.request,
     sourcePath,
@@ -95,15 +101,13 @@ export async function tryPrepareAdaptivePatternFastPath(
       referenceText
     );
     if (!localIssue) {
-      const localCall: ToolCall = {
-        id: randomUUID(),
-        name: 'create_file',
-        arguments: {
-          filePath: targetPath,
-          content: localContent,
-          reason: `Arquivo sintetizado localmente a partir do padrão comprovado em ${referencePath}.`
-        }
-      };
+      const prepared = await prepareAdaptiveWrite({
+        root,
+        targetPath,
+        content: localContent,
+        reason: `Arquivo sintetizado localmente a partir do padrão comprovado em ${referencePath}.`,
+        execute: options.execute
+      });
       options.info?.([
         '[AdaptiveFastPath] Padrão mecânico reconhecido; modelo não será chamado.',
         `tipo=${synthesized.kind}`,
@@ -111,11 +115,20 @@ export async function tryPrepareAdaptivePatternFastPath(
         `destino=${targetPath}`,
         `evidências=${synthesized.evidence.join(' | ')}`
       ].join(' '));
-      const localResult = await options.execute(localCall);
-      if (localResult.ok) {
+      if (prepared.unchanged) {
         return {
-          call: localCall,
-          result: localResult,
+          complete: true,
+          text: [
+            'O arquivo já segue o padrão esperado; nenhuma alteração foi necessária.',
+            `Arquivo: ${targetPath}`,
+            `Padrão extraído de: ${referencePath}`
+          ].join('\n\n')
+        };
+      }
+      if (prepared.result?.ok) {
+        return {
+          call: prepared.call,
+          result: prepared.result,
           complete: true,
           text: [
             'Arquivo preparado para revisão pelo Fast Path adaptativo.',
@@ -126,10 +139,10 @@ export async function tryPrepareAdaptivePatternFastPath(
         };
       }
       return {
-        call: localCall,
-        result: localResult,
+        call: prepared.call,
+        result: prepared.result,
         complete: false,
-        text: `O padrão foi sintetizado, mas não foi possível preparar ${targetPath}: ${localResult.error ?? 'erro desconhecido'}`
+        text: `O padrão foi sintetizado, mas não foi possível preparar ${targetPath}: ${prepared.result?.error ?? 'erro desconhecido'}`
       };
     }
     options.warn?.(`[AdaptiveFastPath] Síntese local rejeitada (${localIssue}); usando geração direta compacta.`);
@@ -169,8 +182,16 @@ export async function tryPrepareAdaptivePatternFastPath(
       maxTokens: budget.maxTokens
     });
   } catch (error) {
-    options.warn?.(`[AdaptiveFastPath] Geração direta falhou: ${error instanceof Error ? error.message : String(error)}.`);
-    return undefined;
+    const message = error instanceof Error ? error.message : String(error);
+    options.warn?.(`[AdaptiveFastPath] Geração direta falhou: ${message}.`);
+    return {
+      complete: false,
+      text: [
+        'O padrão e o destino foram resolvidos pelo Fast Path adaptativo, mas a geração direta falhou.',
+        `Motivo: ${message}`,
+        'Nenhuma alteração foi preparada e o AgentLoop não será iniciado para evitar uma segunda tentativa longa.'
+      ].join('\n\n')
+    };
   }
 
   const content = normalizeGeneratedContent(generated, targetPath);
@@ -187,29 +208,32 @@ export async function tryPrepareAdaptivePatternFastPath(
     };
   }
 
-  const call: ToolCall = {
-    id: randomUUID(),
-    name: 'create_file',
-    arguments: {
-      filePath: targetPath,
-      content,
-      reason: `Arquivo gerado pelo Adaptive Fast Path a partir do padrão comprovado em ${referencePath}.`
-    }
-  };
-  const result = await options.execute(call);
-  if (!result.ok) {
-    options.warn?.(`[AdaptiveFastPath] create_file falhou: ${result.error ?? 'erro desconhecido'}.`);
+  const prepared = await prepareAdaptiveWrite({
+    root,
+    targetPath,
+    content,
+    reason: `Arquivo gerado pelo Adaptive Fast Path a partir do padrão comprovado em ${referencePath}.`,
+    execute: options.execute
+  });
+  if (prepared.unchanged) {
     return {
-      call,
-      result,
+      complete: true,
+      text: `O arquivo ${targetPath} já contém o conteúdo esperado; nenhuma alteração foi necessária.`
+    };
+  }
+  if (!prepared.result?.ok) {
+    options.warn?.(`[AdaptiveFastPath] Escrita adaptativa falhou: ${prepared.result?.error ?? 'erro desconhecido'}.`);
+    return {
+      call: prepared.call,
+      result: prepared.result,
       complete: false,
-      text: `O conteúdo foi gerado, mas não foi possível preparar ${targetPath}: ${result.error ?? 'erro desconhecido'}`
+      text: `O conteúdo foi gerado, mas não foi possível preparar ${targetPath}: ${prepared.result?.error ?? 'erro desconhecido'}`
     };
   }
 
   return {
-    call,
-    result,
+    call: prepared.call,
+    result: prepared.result,
     complete: true,
     text: [
       'Arquivo preparado para revisão pelo Fast Path adaptativo.',
@@ -236,12 +260,14 @@ export function inferTargetPath(
   const referenceExt = path.extname(referenceBase);
   if (sourceExt.toLowerCase() !== referenceExt.toLowerCase()) return undefined;
 
-  if (isJavaUnitTestCreationTask(request) && sourceExt.toLowerCase() === '.java' && /Test\.java$/i.test(referenceBase)) {
+  if (isJavaUnitTestCreationTask(request, [normalizedSource]) && sourceExt.toLowerCase() === '.java' && /Test\.java$/i.test(referenceBase)) {
     const className = path.posix.basename(sourceBase, '.java');
-    if (SAME_LOCATION.test(request)) return path.posix.join(path.posix.dirname(normalizedReference), `${className}Test.java`);
-    if (profile.testRoot && profile.packageName) {
-      return path.posix.join(profile.testRoot, profile.packageName.replace(/\./g, '/'), `${className}Test.java`);
-    }
+
+    // Uma referência de teste explicitamente citada pelo usuário é a melhor
+    // evidência disponível para a convenção real de localização/pacote. Não
+    // pressupomos que o pacote de testes espelha o package da produção: vários
+    // projetos usam convenções como br.gov...tests.dto para testar ...dto.
+    // O ProjectProfiler já garante que referência/origem pertencem ao workspace.
     return path.posix.join(path.posix.dirname(normalizedReference), `${className}Test.java`);
   }
 
@@ -318,7 +344,7 @@ function resolvePrioritySource(root: string, priority: readonly string[]): strin
     if (!raw) continue;
     try {
       const relative = normalizeRelativePath(raw);
-      if (isLikelyReferenceArtifact(relative)) continue;
+      if (isLikelyReferenceArtifact(relative) || !isSourceCodeArtifact(relative)) continue;
       if (fileExists(resolveInsideRoot(root, relative))) return relative;
     } catch {
       // Próximo.
@@ -329,6 +355,10 @@ function resolvePrioritySource(root: string, priority: readonly string[]): strin
 
 function isLikelyReferenceArtifact(filePath: string): boolean {
   return /(?:Test|Tests)\.java$|\.(?:spec|test)\.[jt]sx?$/i.test(path.posix.basename(filePath));
+}
+
+function isSourceCodeArtifact(filePath: string): boolean {
+  return /\.(?:java|ts|tsx|js|jsx|py|cs|go|rs)$/i.test(path.posix.basename(filePath));
 }
 
 function adaptiveGenerationBudget(contextSize: number): { sourceChars: number; referenceChars: number; maxTokens: number } {
@@ -401,6 +431,12 @@ function adaptiveContentIssue(
     }
     if (!balancedBraces(content)) return 'O arquivo Java parece truncado: chaves não estão balanceadas.';
   }
+  if (/\.json$/i.test(targetPath)) {
+    try { JSON.parse(content); } catch { return 'O JSON gerado está incompleto ou inválido.'; }
+  }
+  if (/\.(?:ts|tsx|js|jsx)$/i.test(targetPath) && !balancedDelimiters(content)) {
+    return 'O arquivo TypeScript/JavaScript parece truncado: delimitadores não estão balanceados.';
+  }
   return undefined;
 }
 
@@ -428,6 +464,73 @@ function balancedBraces(content: string): boolean {
     else if (ch === '}') { depth -= 1; if (depth < 0) return false; }
   }
   return depth === 0 && !quote && !blockComment;
+}
+
+async function prepareAdaptiveWrite(params: {
+  root: string;
+  targetPath: string;
+  content: string;
+  reason: string;
+  execute: (call: ToolCall) => Promise<ToolResult>;
+}): Promise<{ call?: ToolCall; result?: ToolResult; unchanged?: boolean }> {
+  const absolute = resolveInsideRoot(params.root, params.targetPath);
+  let current: string | undefined;
+  try { current = await fsp.readFile(absolute, 'utf8'); } catch { current = undefined; }
+  if (current !== undefined && normalizeComparable(current) === normalizeComparable(params.content)) {
+    return { unchanged: true };
+  }
+
+  const call: ToolCall = current === undefined
+    ? {
+        id: randomUUID(),
+        name: 'create_file',
+        arguments: { filePath: params.targetPath, content: params.content, reason: params.reason }
+      }
+    : {
+        id: randomUUID(),
+        name: 'apply_edit',
+        arguments: {
+          filePath: params.targetPath,
+          oldText: current,
+          newText: params.content,
+          replaceAll: false
+        }
+      };
+  return { call, result: await params.execute(call) };
+}
+
+function normalizeComparable(value: string): string {
+  return value.replace(/\r\n/g, '\n').trim();
+}
+
+function balancedDelimiters(content: string): boolean {
+  const pairs: Record<string, string> = { '{': '}', '[': ']', '(': ')' };
+  const closers = new Set(Object.values(pairs));
+  const stack: string[] = [];
+  let quote: string | undefined;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = 0; index < content.length; index += 1) {
+    const ch = content[index];
+    const next = content[index + 1];
+    if (lineComment) { if (ch === '\n') lineComment = false; continue; }
+    if (blockComment) { if (ch === '*' && next === '/') { blockComment = false; index += 1; } continue; }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === '/' && next === '/') { lineComment = true; index += 1; continue; }
+    if (ch === '/' && next === '*') { blockComment = true; index += 1; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (!ch) continue;
+    const expectedCloser = pairs[ch];
+    if (expectedCloser) stack.push(expectedCloser);
+    else if (closers.has(ch) && stack.pop() !== ch) return false;
+  }
+  return stack.length === 0 && !quote && !blockComment;
 }
 
 function escapeRegex(value: string): string {

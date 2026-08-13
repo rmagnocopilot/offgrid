@@ -80,6 +80,17 @@ function compactKnownToolContent(toolName: string, content: unknown, maxChars: n
     };
   }
 
+  if (toolName === 'run_java_coverage') {
+    return {
+      moduleRoot: record.moduleRoot,
+      buildSystem: record.buildSystem,
+      reportPath: record.reportPath,
+      className: record.className,
+      summary: record.summary,
+      buildOutputOmitted: true
+    };
+  }
+
   return content;
 }
 

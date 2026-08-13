@@ -9,6 +9,7 @@ import { normalizeRelativePath, isWriteProtectedPath, resolveInsideRoot, assertN
 import { ApprovalService } from '../safety/ApprovalService';
 import type { FileLogger } from '../diagnostics/FileLogger';
 import { validateContentAgainstProjectInstructions } from '../context/ProjectInstructions';
+import { buildJavaCoveragePlan, runJavaCoveragePlan } from '../coverage/JavaCoverage';
 
 const execFileAsync = promisify(execFile);
 const EXCLUDE = '**/{node_modules,.git,out,dist,build,coverage,.next,.nuxt,.cache,.venv,venv,target}/**';
@@ -178,6 +179,7 @@ export class WorkspaceTools {
       case 'delete_file': return this.stageDelete(String(args.filePath), String(args.reason ?? ''));
       case 'rename_file': return this.renameFile(String(args.filePath), String(args.newPath));
       case 'run_terminal': return this.runTerminal(String(args.command));
+      case 'run_java_coverage': return this.runJavaCoverage(String(args.filePath));
       case 'apply_changes': {
         if (!this.staged.size) throw new Error('Nenhuma alteração foi preparada para revisão.');
         this.reviewSummary = String(args.summary || 'Alterações propostas pelo Agente');
@@ -414,6 +416,27 @@ export class WorkspaceTools {
     }
     return { staged: true, renamed: true, from, to };
   }
+  private async runJavaCoverage(filePath: string): Promise<unknown> {
+    this.requireWorkspace();
+    const relative = normalizeRelativePath(filePath);
+    const plan = await buildJavaCoveragePlan(this.workspaceRoot!, relative);
+    if (!plan.configured) {
+      throw new Error(`${plan.reason ?? 'JaCoCo não configurado.'} O Offgrid não altera o build automaticamente para adicionar cobertura.`);
+    }
+    if (!await this.approval.confirmTerminal(plan.command)) throw new Error('Execução do JaCoCo rejeitada pelo usuário.');
+    const className = path.posix.basename(relative, '.java');
+    const result = await runJavaCoveragePlan(plan, className);
+    return {
+      moduleRoot: plan.moduleRoot || '.',
+      buildSystem: plan.buildSystem,
+      reportPath: path.relative(this.workspaceRoot!, result.reportPath).replace(/\\/g, '/'),
+      className,
+      summary: result.summary,
+      stdout: result.stdout,
+      stderr: result.stderr
+    };
+  }
+
   private async runTerminal(command: string): Promise<unknown> {
     this.requireWorkspace();
     if (!await this.approval.confirmTerminal(command)) throw new Error('Comando rejeitado pelo usuário.');

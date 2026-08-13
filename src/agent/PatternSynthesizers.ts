@@ -47,6 +47,7 @@ export function trySynthesizeJavaAccessorTest(input: PatternSynthesisInput): Pat
   const referenceSubject = referenceTestClass.replace(/Test$/, '');
   const instance = findReferenceInstance(input.referenceText, referenceSubject);
   if (!instance) return undefined;
+  if (!hasUsableZeroArgConstructor(input.sourceText, sourceClass)) return undefined;
 
   const accessors = collectAccessorPairs(input.sourceText);
   if (!accessors.length) return undefined;
@@ -105,6 +106,20 @@ export function trySynthesizeJavaAccessorTest(input: PatternSynthesisInput): Pat
       `pacote de teste ${referencePackage}`
     ]
   };
+}
+
+function hasUsableZeroArgConstructor(source: string, className: string): boolean {
+  const escaped = escapeRegex(className);
+  const constructors = [...source.matchAll(new RegExp(
+    `\\b(public|protected|private)?\\s*${escaped}\\s*\\(([^)]*)\\)\\s*\\{`,
+    'g'
+  ))];
+  if (!constructors.length) return true;
+  return constructors.some(match => {
+    const visibility = match[1] ?? '';
+    const parameters = String(match[2] ?? '').trim();
+    return visibility !== 'private' && parameters.length === 0;
+  });
 }
 
 function collectAccessorPairs(source: string): AccessorPair[] {
@@ -224,9 +239,11 @@ function buildAccessorTestMethod(accessor: AccessorPair, variableName: string, v
 }
 
 function inferTestName(reference: string, property: string): string {
-  const names = [...reference.matchAll(/\bpublic\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{/g)].map(match => match[1]).filter(Boolean);
-  if (names.some(name => /^testGetSet[A-Z]/.test(name ?? ''))) return `testGetSet${property}`;
-  if (names.some(name => /^deve[A-Z]/.test(name ?? ''))) return `devePermitirGetSet${property}`;
+  const names = [...reference.matchAll(/\bpublic\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{/g)]
+    .map(match => match[1])
+    .filter((name): name is string => typeof name === 'string' && name.length > 0);
+  if (names.some(name => /^testGetSet[A-Z]/.test(name))) return `testGetSet${property}`;
+  if (names.some(name => /^deve[A-Z]/.test(name))) return `devePermitirGetSet${property}`;
   return `testGetSet${property}`;
 }
 
@@ -304,4 +321,3 @@ function importGroup(value: string): number {
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
-

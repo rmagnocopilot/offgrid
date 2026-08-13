@@ -40,7 +40,9 @@ export async function profileProject(params: {
   const referencePath = params.referencePath ? normalizeRelativePath(params.referencePath) : undefined;
   const moduleRoot = inferModuleRoot(root, sourcePath ?? referencePath);
   const fingerprint = await profileFingerprint(root, moduleRoot);
-  const key = `${root.toLowerCase()}::${moduleRoot.toLowerCase()}`;
+  const sourceScope = sourcePath ? path.posix.dirname(sourcePath).toLowerCase() : '';
+  const referenceScope = referencePath ? path.posix.dirname(referencePath).toLowerCase() : '';
+  const key = `${root.toLowerCase()}::${moduleRoot.toLowerCase()}::${sourceScope}::${referenceScope}`;
   const cached = cache.get(key);
   if (cached?.fingerprint === fingerprint) {
     return enrichProfile(cached.profile, params.sourceText, params.referenceText);
@@ -76,7 +78,8 @@ export async function findWorkspaceReference(
   workspaceRoot: string,
   request: string,
   priority: readonly string[] = [],
-  preferredExtension?: string
+  preferredExtension?: string,
+  moduleRootHint = ''
 ): Promise<string | undefined> {
   const candidates = extractReferenceCandidates(request, preferredExtension);
 
@@ -85,6 +88,7 @@ export async function findWorkspaceReference(
     if (!raw) continue;
     try {
       const relative = normalizeRelativePath(raw);
+      if (moduleRootHint && !isInsideModule(relative, moduleRootHint)) continue;
       if (!fileExists(resolveInsideRoot(workspaceRoot, relative))) continue;
       const base = path.posix.basename(relative).toLowerCase();
       const stem = base.replace(/\.[^.]+$/, '');
@@ -95,10 +99,58 @@ export async function findWorkspaceReference(
   }
 
   for (const candidate of candidates) {
-    const found = await findFileByCandidate(workspaceRoot, candidate.base, candidate.stem, preferredExtension);
+    const found = await findFileByCandidate(
+      workspaceRoot,
+      candidate.base,
+      candidate.stem,
+      preferredExtension,
+      moduleRootHint,
+      'reference'
+    );
     if (found) return found;
   }
   return undefined;
+}
+
+export async function findWorkspaceSource(
+  workspaceRoot: string,
+  request: string,
+  priority: readonly string[] = [],
+  preferredExtension?: string
+): Promise<string | undefined> {
+  const candidates = extractSourceCandidates(request, preferredExtension);
+  if (!candidates.length) return undefined;
+
+  for (const value of priority) {
+    const raw = String(value ?? '').split('#')[0];
+    if (!raw) continue;
+    try {
+      const relative = normalizeRelativePath(raw);
+      if (isTestArtifact(relative) || !fileExists(resolveInsideRoot(workspaceRoot, relative))) continue;
+      const base = path.posix.basename(relative).toLowerCase();
+      const stem = base.replace(/\.[^.]+$/, '');
+      if (candidates.some(candidate => candidate.base === base || candidate.stem === stem)) return relative;
+    } catch {
+      // Continua para busca no workspace.
+    }
+  }
+
+  for (const candidate of candidates) {
+    const found = await findFileByCandidate(
+      workspaceRoot,
+      candidate.base,
+      candidate.stem,
+      preferredExtension,
+      '',
+      'source'
+    );
+    if (found) return found;
+  }
+  return undefined;
+}
+
+export function workspaceModuleRoot(workspaceRoot: string, filePath?: string): string {
+  return inferModuleRoot(workspaceRoot, filePath);
 }
 
 export function compactSourceForPattern(filePath: string, content: string, maxChars: number): string {
@@ -269,24 +321,51 @@ function extractReferenceCandidates(request: string, preferredExtension?: string
   return [...result.values()];
 }
 
+function extractSourceCandidates(request: string, preferredExtension?: string): Array<{ base: string; stem: string }> {
+  const result = new Map<string, { base: string; stem: string }>();
+  const explicit = request.match(/[A-Za-z0-9_$@.-]+\.(?:java|ts|tsx|js|jsx|py|cs|go|rs|xml|json|ya?ml)/gi) ?? [];
+  for (const value of explicit) {
+    if (!/(?:Test|Tests|Spec)\.[^.]+$/i.test(value)) addCandidate(result, value);
+  }
+
+  const named = request.match(/\b[A-Z][A-Za-z0-9_$]*(?:DTO|Dto|Service|Controller|Resource|Repository|Component|Entity|Model|VO)\b/g) ?? [];
+  const parenthesized = [...request.matchAll(/[(`'"]([A-Z][A-Za-z0-9_$]{2,})[)`'"]/g)]
+    .map(match => match[1])
+    .filter((value): value is string => Boolean(value));
+  const ext = preferredExtension || '.java';
+  for (const name of [...named, ...parenthesized]) {
+    if (/(?:Test|Tests|Spec)$/i.test(name)) continue;
+    addCandidate(result, `${name}${ext.startsWith('.') ? ext : `.${ext}`}`);
+  }
+  return [...result.values()];
+}
+
 function addCandidate(target: Map<string, { base: string; stem: string }>, value: string): void {
   const base = path.posix.basename(value.replace(/\\/g, '/')).toLowerCase();
   const stem = base.replace(/\.[^.]+$/, '');
   target.set(base, { base, stem });
 }
 
-async function findFileByCandidate(root: string, base: string, stem: string, preferredExtension?: string): Promise<string | undefined> {
-  const stack = [root];
+async function findFileByCandidate(
+  root: string,
+  base: string,
+  stem: string,
+  preferredExtension?: string,
+  moduleRootHint = '',
+  kind: 'source' | 'reference' = 'reference'
+): Promise<string | undefined> {
+  const scope = moduleRootHint ? resolveInsideRoot(root, moduleRootHint) : root;
+  const stack = [scope];
   const matches: string[] = [];
   let visited = 0;
-  while (stack.length && visited < 25_000 && matches.length < 24) {
+  while (stack.length && visited < 100_000 && matches.length < 50) {
     const directory = stack.pop();
     if (!directory) break;
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
     for (const entry of entries) {
       visited += 1;
-      if (visited > 25_000) break;
+      if (visited > 100_000) break;
       if (entry.isDirectory()) {
         if (!IGNORED.has(entry.name)) stack.push(path.join(directory, entry.name));
         continue;
@@ -299,14 +378,32 @@ async function findFileByCandidate(root: string, base: string, stem: string, pre
       matches.push(path.relative(root, path.join(directory, entry.name)).replace(/\\/g, '/'));
     }
   }
-  return matches.sort((left, right) => scorePath(left) - scorePath(right) || left.length - right.length || left.localeCompare(right))[0];
+  return matches.sort((left, right) => scorePath(left, kind) - scorePath(right, kind) || left.length - right.length || left.localeCompare(right))[0];
 }
 
-function scorePath(value: string): number {
+function scorePath(value: string, kind: 'source' | 'reference'): number {
   const lower = value.toLowerCase();
+  if (kind === 'source') {
+    if (lower.includes('/src/main/')) return 0;
+    if (lower.includes('/src/')) return 1;
+    if (isTestArtifact(lower)) return 9;
+    return 3;
+  }
   if (lower.includes('/src/test/')) return 0;
   if (lower.includes('/test/')) return 1;
   return 2;
+}
+
+function isInsideModule(filePath: string, moduleRoot: string): boolean {
+  if (!moduleRoot) return true;
+  const normalized = filePath.replace(/\\/g, '/').toLowerCase();
+  const module = moduleRoot.replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
+  return normalized === module || normalized.startsWith(`${module}/`);
+}
+
+function isTestArtifact(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, '/');
+  return /(?:^|\/)src\/test\/|(?:Test|Tests)\.java$|\.(?:spec|test)\.[jt]sx?$/i.test(normalized);
 }
 
 function compactJavaTestReference(content: string, maxChars: number): string {

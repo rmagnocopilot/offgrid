@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import type { ToolCall, ToolResult } from '../types/contracts';
 import { detectToolCalls, looksLikeToolCall, looksLikeToolSchema, looksLikeTruncatedCreateFileCall } from './ToolCallParser';
 import { compactTaskReminderForContinuation, serializeToolArgumentsForPrompt, serializeToolResultForPrompt } from './AgentToolResultBudget';
+import { generatedFileContentIssue } from './AgentTaskPolicy';
 
 export interface AgentLoopLogger {
   (level: 'trace' | 'debug' | 'info' | 'warn' | 'error', message: string): void;
@@ -16,6 +18,10 @@ export interface AgentLoopOptions {
   executeTool: (call: ToolCall) => Promise<ToolResult>;
   /** Limite total aproximado do prompt de continuação após ferramentas. */
   continuationPromptMaxChars?: number;
+  /** Tarefas de criação no modo Agente não podem terminar apenas em texto. */
+  requiredWrite?: boolean;
+  /** Destino determinístico usado para converter código completo em create_file. */
+  expectedCreateFilePath?: string;
   log: AgentLoopLogger;
 }
 
@@ -145,6 +151,43 @@ function skippedApplyChangesResult(call: ToolCall): ToolResult {
   };
 }
 
+
+function extractCompleteFileContent(response: string, targetPath: string): string | undefined {
+  const raw = String(response ?? '').trim();
+  if (!raw) return undefined;
+
+  const fences = [...raw.matchAll(/```(?:[A-Za-z0-9_+.-]+)?\s*\r?\n([\s\S]*?)\r?\n```/g)]
+    .map(match => match[1]?.trim())
+    .filter((value): value is string => Boolean(value));
+  let candidate = fences.at(-1);
+
+  if (!candidate) {
+    const extension = targetPath.toLowerCase();
+    if (extension.endsWith('.java') && /^(?:package\s+[^;]+;\s*)?(?:import\s+[^;]+;\s*)*(?:@[A-Za-z_$]|public\s+|class\s+)/s.test(raw)) {
+      candidate = raw;
+    } else if (/\.(?:ts|tsx|js|jsx|py|cs|go|rs)$/i.test(extension) && !/^\s*(?:Aqui|Segue|Here|I will|Vou)\b/i.test(raw)) {
+      candidate = raw;
+    }
+  }
+
+  if (!candidate) return undefined;
+  const normalized = candidate.replace(/\r?\n/g, '\n').trimEnd() + '\n';
+  if (/\.java$/i.test(targetPath) && !normalized.trimEnd().endsWith('}')) return undefined;
+  return normalized;
+}
+
+function looksLikeIncompleteFileResponse(response: string, targetPath?: string): boolean {
+  if (!targetPath) return false;
+  const raw = String(response ?? '');
+  const fenceCount = (raw.match(/```/g) ?? []).length;
+  if (fenceCount % 2 === 1) return true;
+  if (/\.java$/i.test(targetPath)) {
+    const codeLike = /\b(?:package|import|public\s+class|class)\b/.test(raw) && /@Test\b|\bclass\b/.test(raw);
+    if (codeLike && !raw.trimEnd().endsWith('}')) return true;
+  }
+  return false;
+}
+
 export class AgentLoop {
   async run(options: AgentLoopOptions): Promise<AgentLoopResult> {
     const limit = Math.max(1, Math.min(30, Math.floor(options.maxSteps || 10)));
@@ -186,6 +229,61 @@ export class AgentLoop {
               ? 'O modelo retornou o schema da ferramenta em vez de executá-la, mesmo após uma tentativa de correção. Consulte os logs do Agente.'
               : 'O modelo retornou uma chamada de ferramenta inválida, mesmo após uma tentativa de correção. Consulte os logs do Agente.');
           }
+
+          if (options.requiredWrite && successfulWrites.length === 0) {
+            const targetPath = options.expectedCreateFilePath;
+            const recoveredContent = targetPath
+              ? extractCompleteFileContent(response, targetPath)
+              : undefined;
+
+            if (targetPath && recoveredContent) {
+              const validationIssue = generatedFileContentIssue(
+                targetPath,
+                recoveredContent,
+                { request: options.taskReminder }
+              );
+              if (!validationIssue) {
+                const recoveredCall: ToolCall = {
+                  id: randomUUID(),
+                  name: 'create_file',
+                  arguments: {
+                    filePath: targetPath,
+                    content: recoveredContent,
+                    reason: 'Conteúdo completo retornado pelo modelo em modo Agente; convertido internamente para create_file.'
+                  }
+                };
+                options.log('info', `[AgentLoop] Resposta de código completa convertida internamente em create_file para ${targetPath}.`);
+                calls.push(recoveredCall);
+                const recoveredResult = await options.executeTool(recoveredCall);
+                results.push(recoveredResult);
+                if (!recoveredResult.ok) {
+                  throw new Error(recoveredResult.error ?? `Não foi possível preparar ${targetPath}.`);
+                }
+                successfulWrites.push(recoveredCall);
+                return {
+                  text: reviewText(undefined, successfulWrites, options.taskReminder),
+                  steps: step,
+                  calls,
+                  results
+                };
+              }
+              options.log('warn', `[AgentLoop] Código retornado sem ferramenta foi rejeitado: ${validationIssue}`);
+            }
+
+            if (looksLikeIncompleteFileResponse(response, targetPath)) {
+              throw Object.assign(
+                new Error('A geração do arquivo terminou incompleta antes do fechamento do código. Nenhuma alteração foi preparada.'),
+                { name: 'GeneratedFileTruncatedError' }
+              );
+            }
+
+            throw new Error(
+              targetPath
+                ? `O modo Agente precisava criar ${targetPath}, mas o modelo terminou sem preparar nenhuma escrita.`
+                : 'O modo Agente precisava preparar uma alteração, mas o modelo terminou apenas em texto. Nenhuma alteração foi aplicada.'
+            );
+          }
+
           return { text: response, steps: step, calls, results };
         }
 

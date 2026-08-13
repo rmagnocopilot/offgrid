@@ -1,4 +1,4 @@
-﻿import * as path from 'node:path';
+import * as path from 'node:path';
 import { fork, type ChildProcess } from 'node:child_process';
 import type {
   EngineDiagnostics, EngineLoadOptions, EngineRequestMethod, EngineResult, EngineErrorMessage,
@@ -113,7 +113,7 @@ export class EngineClient {
               );
               this.logger.warn(
                 'model',
-                `[Load] ${(lastError instanceof Error ? lastError.message : String(lastError))} Tentando um perfil com menos camadas.`
+                `[Load] ${lastError instanceof Error ? lastError.message : String(lastError)} Tentando um perfil com menos camadas.`
               );
               await this.rpc('unload', {}, { timeoutMs: 30_000 }).catch(() => undefined);
               continue;
@@ -207,6 +207,8 @@ export class EngineClient {
     signal?: AbortSignal;
     executeTool: (call: ToolCall) => Promise<ToolResult>;
     continuationPromptMaxChars?: number;
+    requiredWrite?: boolean;
+    expectedCreateFilePath?: string;
   }): Promise<string> {
     this.busyOperation = 'agent';
     let started = false;
@@ -235,6 +237,8 @@ export class EngineClient {
         log: (level, message) => this.logger.log(level, 'agent', message),
         executeTool: params.executeTool,
         continuationPromptMaxChars: params.continuationPromptMaxChars,
+        requiredWrite: params.requiredWrite,
+        expectedCreateFilePath: params.expectedCreateFilePath,
         invokeStep: async (prompt, step) => {
           const stepStartedAt = Date.now();
           // Chamadas de escrita carregam o conteúdo completo do arquivo dentro do
