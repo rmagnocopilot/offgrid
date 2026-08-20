@@ -99,6 +99,26 @@ test('não reinicia quando o contexto atual já é suficiente', () => {
   assert.equal(shouldExpandContext(4096, result), true);
 });
 
+test('não reduz no planejamento uma janela 8192 que já está carregada', () => {
+  const qwen4b = model('qwen3-4b', 4, 8192, 8192, 12288, 2.5);
+  const result = planContext({
+    mode: 'automatic',
+    manualContextSize: 4096,
+    model: qwen4b,
+    modelFileSizeBytes: 2.5 * GIB,
+    resources: {
+      ...resources(32, 1),
+      engineRam: { pid: 10, workingSetBytes: 2.5 * GIB }
+    },
+    currentContextSize: 8192,
+    task: { complexity: 'simple', estimatedFiles: 1, reason: 'teste Java' }
+  });
+  assert.equal(result.desiredContextSize, 8192);
+  assert.equal(result.contextSize, 8192);
+  assert.equal(result.constrainedByMemory, false);
+  assert.equal(shouldExpandContext(8192, result), false);
+});
+
 test('fallbacks são decrescentes e não passam do mínimo', () => {
   assert.deepEqual(contextFallbacks(12288, 4096), [12288, 8192, 4096]);
 });

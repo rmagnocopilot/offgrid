@@ -2,7 +2,7 @@
   "name": "offgrid",
   "displayName": "Offgrid",
   "description": "Assistente de programação local e offline para VS Code, com Chat, Agente por ferramentas, modelos GGUF e revisão visual.",
-  "version": "2.0.9",
+  "version": "2.0.10",
   "publisher": "rmagnocopilot",
   "license": "MIT",
   "engines": {

@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
+const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const { buildJavaCoveragePlan, parseJacocoXml, summarizeJacocoXml } = require('../out/coverage/JavaCoverage');
 
@@ -70,4 +71,12 @@ test('plano de cobertura recusa adicionar JaCoCo automaticamente quando build n�
   const plan = await buildJavaCoveragePlan(root, source);
   assert.equal(plan.configured, false);
   assert.match(plan.reason, /não possui configuração JaCoCo/i);
+});
+
+test('src/coverage permanece versionável enquanto relatórios coverage continuam ignorados', () => {
+  const gitignore = fs.readFileSync(path.join(__dirname, '..', '.gitignore'), 'utf8');
+  assert.match(gitignore, /^coverage\/$/m);
+  assert.match(gitignore, /^!src\/coverage\/$/m);
+  assert.match(gitignore, /^!src\/coverage\/\*\*$/m);
+  assert.equal(fs.existsSync(path.join(__dirname, '..', 'src', 'coverage', 'JavaCoverage.ts')), true);
 });

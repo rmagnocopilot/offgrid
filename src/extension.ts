@@ -640,10 +640,23 @@ async function submit(s: Services, text: string, mode: ConversationMode): Promis
           return;
         }
 
+        // O pedido pode citar apenas o teste de referência enquanto a classe
+        // de produção permanece aberta em outro grupo do editor. Para o
+        // Adaptive Fast Path, acrescentamos fontes visíveis não-test sem mudar
+        // a política global de contexto nem promover a referência a alvo.
+        const adaptivePriority = [
+          ...priority,
+          ...vscode.window.visibleTextEditors
+            .filter(editor => editor.document.uri.scheme === 'file' && Boolean(vscode.workspace.getWorkspaceFolder(editor.document.uri)))
+            .map(editor => vscode.workspace.asRelativePath(editor.document.uri, false))
+            .filter(file => /\.(?:java|ts|tsx|js|jsx|py|cs|go|rs)$/i.test(file))
+            .filter(file => !/(?:Test|Tests)\.java$|(?:spec|test)\.(?:ts|tsx|js|jsx)$/i.test(file))
+        ].filter((value, index, all) => all.indexOf(value) === index);
+
         const adaptiveFastPath = await tryPrepareAdaptivePatternFastPath({
           request: text,
           workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-          priority,
+          priority: adaptivePriority,
           contextSize: s.engine.diagnostics.contextSize ?? 4_096,
           generate: params => s.engine.generateDirect({ ...params, signal: controller.signal }),
           execute: call => s.tools.execute(call),

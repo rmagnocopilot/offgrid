@@ -28,10 +28,10 @@ test('runtime nativo do llama.cpp fica em warn na operação normal', () => {
   assert.doesNotMatch(llama, /logLevel: runtime\.LlamaLogLevel\?\.debug/);
 });
 
-test('README publicado reflete 2.0.9 e interface atual', () => {
+test('README publicado reflete 2.0.10 e interface atual', () => {
   const readme = read('README.md');
-  assert.match(readme, /# Offgrid 2\.0\.9/);
-  assert.match(readme, /offgrid-2\.0\.9\.vsix/);
+  assert.match(readme, /# Offgrid 2\.0\.10/);
+  assert.match(readme, /offgrid-2\.0\.10\.vsix/);
   assert.doesNotMatch(readme, /\*\*Somente leitura:\*\*/);
   assert.match(readme, /nível padrão é \*\*`info`\*\*/);
 });

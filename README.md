@@ -2,12 +2,17 @@
   <img src="resources/branding/offgrid-logo.png" alt="Offgrid" width="260">
 </p>
 
-# Offgrid 2.0.9
+# Offgrid 2.0.10
 
 Assistente local e offline para Visual Studio Code, reescrito em **TypeScript**. A arquitetura segue a separação usada pelo Unplugged entre Agente, ferramentas, contexto, segurança, motor LLM e interface, preservando os recursos adicionais construídos no Offgrid.
 
-## Novidades da versão 2.0.9
+## Novidades da versão 2.0.10
 
+- DTOs/POJOs com getters/setters de tipos de domínio, enums, coleções ou arrays agora permanecem no **Adaptive Fast Path local**; tipos de referência sem fixture comprovada usam `null` de forma estrutural, evitando mandar o arquivo inteiro ao Qwen;
+- pedidos que citam apenas um `*Test.java` como padrão não promovem essa referência a classe-alvo: fontes de produção visíveis em outros grupos do editor entram como candidatas separadas e, se nenhuma origem puder ser comprovada, o fluxo encerra rapidamente sem AgentLoop longo;
+- a busca da referência usa o módulo da origem prioritária/visível, reduzindo risco de escolher testes homônimos de outro módulo;
+- o planejador preserva a janela de contexto efetivamente carregada: uma sessão em 8192 não passa a ser relatada como 4096 com `acao=keep` apenas porque a RAM livre caiu depois da carga;
+- `src/coverage` passa a ser explicitamente versionável apesar da regra que ignora relatórios `coverage/`, garantindo que `JavaCoverage.ts` esteja presente em clones limpos do repositório;
 - corrige o caso real em que pedidos como **“crie a classe de testes para TarifaSiapfDTO usando AcompanhamentoObrasHistoricoDTOTest como exemplo”** eram reconhecidos como teste Java pelo `TaskIntent`, mas não pelo Adaptive Fast Path por não conterem a palavra “unitário”;
 - o Adaptive Fast Path passa a reconhecer **classe de testes Java** quando há uma origem Java comprovada, sem confundir specs TypeScript;
 - quando um teste de referência é citado explicitamente, o diretório desse teste passa a ser a evidência principal para o destino. Isso preserva convenções como `src/main/.../dto` → `src/test/.../tests/dto`, sem presumir espelhamento de packages;
@@ -139,7 +144,7 @@ npm run package
 Arquivo esperado:
 
 ```text
-offgrid-2.0.9.vsix
+offgrid-2.0.10.vsix
 ```
 
 Os modelos em `globalStorage/rmagnocopilot.offgrid/models` permanecem após a atualização do VSIX.

@@ -63,7 +63,6 @@ export function trySynthesizeJavaAccessorTest(input: PatternSynthesisInput): Pat
   const extraImports = new Set<string>();
   for (const accessor of accessors) {
     const value = chooseValue(accessor.typeName, valueByType, observedValues, extraImports);
-    if (!value) return undefined;
     testMethods.push(buildAccessorTestMethod(accessor, instance.variableName, value, input.referenceText));
   }
 
@@ -192,10 +191,14 @@ function chooseValue(
   valuesByType: Map<string, string>,
   observedValues: Map<string, string>,
   extraImports: Set<string>
-): string | undefined {
+): string {
   const normalized = normalizeType(typeName);
   const direct = valuesByType.get(normalized);
   if (direct) return direct;
+
+  // Arrays são referências em Java. Evita reutilizar um literal escalar
+  // incompatível (por exemplo, String[] recebendo "teste").
+  if (/\[\]\s*$/.test(typeName.trim())) return 'null';
 
   const simple = baseType(typeName);
   const primitiveKind = typeKind(simple);
@@ -216,15 +219,29 @@ function chooseValue(
     case 'LocalDate': extraImports.add('java.time.LocalDate'); return 'LocalDate.of(2026, 1, 1)';
     case 'LocalDateTime': extraImports.add('java.time.LocalDateTime'); return 'LocalDateTime.of(2026, 1, 1, 12, 0)';
     default:
-      return undefined;
+      // Para tipos de domínio, enums, coleções e outros objetos, null é um
+      // valor mecanicamente seguro para comprovar o contrato setter/getter sem
+      // inventar construtores, mocks, fixtures ou dependências.
+      return 'null';
   }
 }
 
 function buildAccessorTestMethod(accessor: AccessorPair, variableName: string, value: string, reference: string): string {
   const indent = detectIndent(reference);
   const methodIndent = indent.repeat(2);
-  const resultType = accessor.typeName.trim();
   const testName = inferTestName(reference, accessor.property);
+  if (value === 'null') {
+    // Não declara uma variável do tipo complexo. Assim o teste não precisa
+    // importar o tipo apenas para validar que o setter/getter aceita null.
+    return [
+      `${indent}@Test`,
+      `${indent}public void ${testName}() {`,
+      `${methodIndent}${variableName}.${accessor.setter}(null);`,
+      `${methodIndent}assertEquals(null, ${variableName}.${accessor.getter}());`,
+      `${indent}}`
+    ].join('\n');
+  }
+  const resultType = accessor.typeName.trim();
   const assertion = /^(?:double|Double|float|Float)$/i.test(resultType)
     ? `assertEquals(${value}, resultado, 0.0);`
     : `assertEquals(${value}, resultado);`;

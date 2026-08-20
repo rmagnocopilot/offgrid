@@ -183,22 +183,29 @@ test('pedido real da 2.0.8 infere destino pelo teste de referência e não cai n
   assert.match(result.text, new RegExp(referencePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
-test('quando o padrão não é mecanicamente seguro usa geração direta sem JSON de ferramenta', async t => {
-  const { root, sourcePath, referencePath } = await createSiavoWorkspace();
+test('DTO com tipo de domínio é sintetizado localmente com null sem chamar o modelo', async t => {
+  const { root, sourcePath } = await createSiavoWorkspace();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const absolute = path.join(root, sourcePath);
   const source = await fsp.readFile(absolute, 'utf8');
-  await fsp.writeFile(absolute, source.replace('private String codObjetivo;', 'private ConfiguracaoTarifa codObjetivo;').replace('public String getCodObjetivo()', 'public ConfiguracaoTarifa getCodObjetivo()').replace('public void setCodObjetivo(String value)', 'public void setCodObjetivo(ConfiguracaoTarifa value)'), 'utf8');
-  const generatedPrompts = [];
+  await fsp.writeFile(
+    absolute,
+    source
+      .replace('private String codObjetivo;', 'private ConfiguracaoTarifa codObjetivo;')
+      .replace('public String getCodObjetivo()', 'public ConfiguracaoTarifa getCodObjetivo()')
+      .replace('public void setCodObjetivo(String value)', 'public void setCodObjetivo(ConfiguracaoTarifa value)'),
+    'utf8'
+  );
+  let generations = 0;
   const calls = [];
   const result = await tryPrepareAdaptivePatternFastPath({
     request: REQUEST,
     workspaceRoot: root,
     priority: [sourcePath],
     contextSize: 4096,
-    async generate(params) {
-      generatedPrompts.push(params);
-      return GENERATED;
+    async generate() {
+      generations += 1;
+      throw new Error('LLM não deveria ser chamado para getter/setter de tipo de domínio');
     },
     async execute(call) {
       calls.push(call);
@@ -207,14 +214,47 @@ test('quando o padrão não é mecanicamente seguro usa geração direta sem JSO
   });
   assert.ok(result);
   assert.equal(result.complete, true);
-  assert.equal(generatedPrompts.length, 1);
-  assert.equal(generatedPrompts[0].maxTokens, 1600);
-  assert.ok(generatedPrompts[0].prompt.length < 7000);
-  assert.match(generatedPrompts[0].systemPrompt, /sem JSON/i);
-  assert.match(generatedPrompts[0].prompt, /AcompanhamentoObrasHistoricoDTOTest/);
-  assert.match(generatedPrompts[0].prompt, /testGetSetCodigo/);
+  assert.equal(generations, 0);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].arguments.content, GENERATED);
+  const content = String(calls[0].arguments.content);
+  assert.match(content, /dto\.setCodObjetivo\(null\)/);
+  assert.match(content, /assertEquals\(null, dto\.getCodObjetivo\(\)\)/);
+  assert.doesNotMatch(content, /ConfiguracaoTarifa resultado/);
+  assert.match(result.text, /sem geração LLM/i);
+});
+
+test('array Java usa null na síntese local em vez de literal escalar incompatível', async t => {
+  const { root, sourcePath } = await createSiavoWorkspace();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const absolute = path.join(root, sourcePath);
+  const source = await fsp.readFile(absolute, 'utf8');
+  await fsp.writeFile(
+    absolute,
+    source
+      .replace('private String codObjetivo;', 'private String[] codObjetivo;')
+      .replace('public String getCodObjetivo()', 'public String[] getCodObjetivo()')
+      .replace('public void setCodObjetivo(String value)', 'public void setCodObjetivo(String[] value)'),
+    'utf8'
+  );
+  let generations = 0;
+  const calls = [];
+  const result = await tryPrepareAdaptivePatternFastPath({
+    request: REQUEST,
+    workspaceRoot: root,
+    priority: [sourcePath],
+    contextSize: 4096,
+    async generate() { generations += 1; return GENERATED; },
+    async execute(call) {
+      calls.push(call);
+      return { callId: call.id, name: call.name, ok: true, content: { staged: true }, durationMs: 0 };
+    }
+  });
+  assert.ok(result);
+  assert.equal(result.complete, true);
+  assert.equal(generations, 0);
+  const content = String(calls[0].arguments.content);
+  assert.match(content, /dto\.setCodObjetivo\(null\)/);
+  assert.doesNotMatch(content, /dto\.setCodObjetivo\(STR\)/);
 });
 
 test('não executa escrita se geração direta vier truncada', async t => {
@@ -222,7 +262,11 @@ test('não executa escrita se geração direta vier truncada', async t => {
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const absolute = path.join(root, sourcePath);
   const source = await fsp.readFile(absolute, 'utf8');
-  await fsp.writeFile(absolute, source.replace('private String codObjetivo;', 'private ConfiguracaoTarifa codObjetivo;').replace('public String getCodObjetivo()', 'public ConfiguracaoTarifa getCodObjetivo()').replace('public void setCodObjetivo(String value)', 'public void setCodObjetivo(ConfiguracaoTarifa value)'), 'utf8');
+  await fsp.writeFile(
+    absolute,
+    source.replace('public class TarifaSiapfDTO {', 'public class TarifaSiapfDTO {\n    public TarifaSiapfDTO(String obrigatorio) {}'),
+    'utf8'
+  );
   let executions = 0;
   const result = await tryPrepareAdaptivePatternFastPath({
     request: REQUEST,
@@ -323,6 +367,64 @@ test('geração direta usa sessão isolada e restaura chat sem tool-call JSON', 
   assert.doesNotMatch(block, /new AgentLoop/);
 });
 
+test('pedido genérico separa referência Test da fonte não-test na prioridade', async t => {
+  const { root, sourcePath, referencePath } = await createSiavoWorkspace();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const calls = [];
+  let generations = 0;
+  const result = await tryPrepareAdaptivePatternFastPath({
+    request: 'Crie a classe de teste unitario pode usar AcompanhamentoObrasHistoricoDTOTest como padrao para ver local e forma de fazer os testes',
+    workspaceRoot: root,
+    priority: [referencePath, sourcePath],
+    contextSize: 4096,
+    async generate() {
+      generations += 1;
+      throw new Error('LLM não deveria ser chamado');
+    },
+    async execute(call) {
+      calls.push(call);
+      return { callId: call.id, name: call.name, ok: true, content: { staged: true }, durationMs: 0 };
+    }
+  });
+  assert.ok(result);
+  assert.equal(result.complete, true);
+  assert.equal(generations, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].arguments.filePath, 'siavo-ejb/src/test/java/br/gov/caixa/siavo/tests/dto/TarifaSiapfDTOTest.java');
+});
+
+test('referência de teste sem classe-alvo encerra rápido em vez de iniciar AgentLoop', async t => {
+  const { root, referencePath } = await createSiavoWorkspace();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  let generations = 0;
+  let executions = 0;
+  const result = await tryPrepareAdaptivePatternFastPath({
+    request: 'Crie a classe de teste unitario pode usar AcompanhamentoObrasHistoricoDTOTest como padrao para ver local e forma de fazer os testes',
+    workspaceRoot: root,
+    priority: [referencePath],
+    contextSize: 4096,
+    async generate() { generations += 1; return GENERATED; },
+    async execute() {
+      executions += 1;
+      return { callId: 'x', name: 'create_file', ok: true, content: null, durationMs: 0 };
+    }
+  });
+  assert.ok(result);
+  assert.equal(result.complete, false);
+  assert.equal(generations, 0);
+  assert.equal(executions, 0);
+  assert.match(result.text, /não foi possível determinar/i);
+  assert.match(result.text, /Nenhuma geração longa foi iniciada/i);
+});
+
+test('integração do Adaptive acrescenta fontes visíveis sem promover arquivos Test a alvo', async () => {
+  const source = await fsp.readFile(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
+  assert.match(source, /const adaptivePriority = \[/);
+  assert.match(source, /vscode\.window\.visibleTextEditors/);
+  assert.match(source, /priority: adaptivePriority/);
+  assert.match(source, /\(\?:Test\|Tests\)\\\.java/);
+});
+
 test('resolve classe-alvo citada mesmo quando o arquivo ativo não é Java', async t => {
   const { root, sourcePath, referencePath } = await createSiavoWorkspace();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -393,7 +495,11 @@ test('falha na geração direta é terminal e não devolve undefined para inicia
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const absolute = path.join(root, sourcePath);
   const source = await fsp.readFile(absolute, 'utf8');
-  await fsp.writeFile(absolute, source.replace('private String codObjetivo;', 'private ConfiguracaoTarifa codObjetivo;').replace('public String getCodObjetivo()', 'public ConfiguracaoTarifa getCodObjetivo()').replace('public void setCodObjetivo(String value)', 'public void setCodObjetivo(ConfiguracaoTarifa value)'), 'utf8');
+  await fsp.writeFile(
+    absolute,
+    source.replace('public class TarifaSiapfDTO {', 'public class TarifaSiapfDTO {\n    public TarifaSiapfDTO(String obrigatorio) {}'),
+    'utf8'
+  );
   const result = await tryPrepareAdaptivePatternFastPath({
     request: REQUEST,
     workspaceRoot: root,

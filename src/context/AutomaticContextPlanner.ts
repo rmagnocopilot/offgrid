@@ -155,6 +155,18 @@ export function planContext(input: ContextPlanInput): ContextPlan {
     }
   }
 
+  // Uma queda posterior da RAM livre não reduz retroativamente a janela de um
+  // motor que já está carregado. A memória dessa sessão já foi alocada. Antes,
+  // o planner podia registrar contextoSelecionado=4096 e ação=keep enquanto o
+  // runtime continuava efetivamente em 8192. Reduções só passam a existir após
+  // uma carga/reinício real do motor.
+  const current = Number(input.currentContextSize ?? 0);
+  if (Number.isFinite(current) && current >= profile.minimum && current > selected) {
+    selected = current;
+    selectedRequired = estimateRequiredBytes(input.model, input.modelFileSizeBytes, selected);
+    constrainedByMemory = selected < desired;
+  }
+
   return {
     contextSize: selected,
     desiredContextSize: desired,

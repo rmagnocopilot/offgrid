@@ -53,7 +53,7 @@ export async function tryPrepareAdaptivePatternFastPath(
   const requestedSource = await findWorkspaceSource(root, options.request, options.priority, priorityExtension);
   const sourceForScope = requestedSource ?? prioritySource;
   const preferredExtension = sourceForScope ? path.extname(sourceForScope).toLowerCase() : priorityExtension;
-  const moduleRootHint = requestedSource ? workspaceModuleRoot(root, requestedSource) : '';
+  const moduleRootHint = sourceForScope ? workspaceModuleRoot(root, sourceForScope) : '';
   const referencePath = await findWorkspaceReference(
     root,
     options.request,
@@ -78,6 +78,19 @@ export async function tryPrepareAdaptivePatternFastPath(
   });
   const targetPath = inferTargetPath(options.request, sourcePath, referencePath, profile);
   if (!targetPath) {
+    const unresolvedJavaTest = /Test\.java$/i.test(referencePath)
+      && isJavaUnitTestCreationTask(options.request, [...options.priority, referencePath]);
+    if (unresolvedJavaTest) {
+      options.warn?.('[AdaptiveFastPath] Referência de teste encontrada, mas a classe Java alvo não pôde ser determinada; AgentLoop não será iniciado.');
+      return {
+        complete: false,
+        text: [
+          'O padrão de testes foi encontrado, mas não foi possível determinar com segurança qual classe Java deve ser testada.',
+          `Referência encontrada: ${referencePath}`,
+          'Mantenha a classe de produção aberta no editor ou cite o nome dela no pedido. Nenhuma geração longa foi iniciada.'
+        ].join('\n\n')
+      };
+    }
     options.warn?.('[AdaptiveFastPath] Estrutura reconhecida, mas o destino não pôde ser inferido com confiança; usando AgentLoop.');
     return undefined;
   }
